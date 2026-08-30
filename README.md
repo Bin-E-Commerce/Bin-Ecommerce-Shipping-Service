@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/Bin-E-Commerce/Bin-E-Commerce-UI-Web/main/public/images/logo/logo_no_background.png" alt="Bin E-Commerce" width="220" />
+<img src="https://raw.githubusercontent.com/Bin-E-Commerce/Bin-E-Commerce-UI-Web/main/public/images/logo/logo_icon.png" alt="Bin E-Commerce" width="112" />
 
 # Shipping Service
 
@@ -43,16 +43,16 @@ The provider boundary follows the concepts exposed by GHN — shipment creation,
 
 ## What this service owns
 
-| Responsibility | Shipping Service | Another service |
-| --- | --- | --- |
-| Shipment records and tracking codes | Owns | — |
-| Shipment status history | Owns | — |
-| Demo courier position and route | Owns | — |
-| Order ownership and shop scope | — | Order Service |
-| Seller/shop identity | — | Seller Service |
-| Product names, images and package dimensions | — | Product Service |
-| Customer identity and saved address ownership | — | Auth Service |
-| In-app notifications and email | — | Notification Service |
+| Responsibility                                | Shipping Service | Another service      |
+| --------------------------------------------- | ---------------- | -------------------- |
+| Shipment records and tracking codes           | Owns             | —                    |
+| Shipment status history                       | Owns             | —                    |
+| Demo courier position and route               | Owns             | —                    |
+| Order ownership and shop scope                | —                | Order Service        |
+| Seller/shop identity                          | —                | Seller Service       |
+| Product names, images and package dimensions  | —                | Product Service      |
+| Customer identity and saved address ownership | —                | Auth Service         |
+| In-app notifications and email                | —                | Notification Service |
 
 Shipping Service must not query another service's database. It receives the minimum required snapshot through explicit internal HTTP contracts or Kafka events.
 
@@ -98,20 +98,20 @@ http://localhost:3012/docs
 
 Create `.env` from `.env.example`:
 
-| Variable | Required | Default | Purpose |
-| --- | --- | --- | --- |
-| `NODE_ENV` | No | `development` | Runtime mode and Swagger visibility. |
-| `PORT` | No | `3012` | HTTP port. |
-| `DATABASE_URL` | Yes | — | PostgreSQL connection string. |
-| `DB_SYNCHRONIZE` | No | `false` | Use only with a disposable local database. |
-| `KAFKA_BROKERS` | Yes | `localhost:29092` | Comma-separated Kafka brokers. |
-| `KAFKA_CLIENT_ID` | No | `shipping-service` | Kafka client identifier. |
-| `KAFKA_GROUP_ID` | No | `shipping-service` | Consumer group identifier. |
-| `SHIPPING_PROVIDER` | No | `mock-ghn` | Active provider; demo supports `mock-ghn`. |
-| `DEMO_STEP_DELAY_SECONDS` | No | `0` | Delay between automatic simulation steps. |
-| `WEBHOOK_SECRET` | Yes for webhook routes | — | Secret for protected demo callbacks. |
-| `MAP_DEFAULT_LATITUDE` | No | `10.7769` | Fallback latitude for demo coordinates. |
-| `MAP_DEFAULT_LONGITUDE` | No | `106.7009` | Fallback longitude for demo coordinates. |
+| Variable                  | Required               | Default            | Purpose                                    |
+| ------------------------- | ---------------------- | ------------------ | ------------------------------------------ |
+| `NODE_ENV`                | No                     | `development`      | Runtime mode and Swagger visibility.       |
+| `PORT`                    | No                     | `3012`             | HTTP port.                                 |
+| `DATABASE_URL`            | Yes                    | —                  | PostgreSQL connection string.              |
+| `DB_SYNCHRONIZE`          | No                     | `false`            | Use only with a disposable local database. |
+| `KAFKA_BROKERS`           | Yes                    | `localhost:29092`  | Comma-separated Kafka brokers.             |
+| `KAFKA_CLIENT_ID`         | No                     | `shipping-service` | Kafka client identifier.                   |
+| `KAFKA_GROUP_ID`          | No                     | `shipping-service` | Consumer group identifier.                 |
+| `SHIPPING_PROVIDER`       | No                     | `mock-ghn`         | Active provider; demo supports `mock-ghn`. |
+| `DEMO_STEP_DELAY_SECONDS` | No                     | `0`                | Delay between automatic simulation steps.  |
+| `WEBHOOK_SECRET`          | Yes for webhook routes | —                  | Secret for protected demo callbacks.       |
+| `MAP_DEFAULT_LATITUDE`    | No                     | `10.7769`          | Fallback latitude for demo coordinates.    |
+| `MAP_DEFAULT_LONGITUDE`   | No                     | `106.7009`         | Fallback longitude for demo coordinates.   |
 
 No live GHN token, ShopId or carrier credential is required for the demo provider.
 
@@ -373,17 +373,17 @@ The demo does not geocode real addresses. It uses seeded coordinates by city or 
 
 ## Security and operations
 
-| Concern | Policy |
-| --- | --- |
-| Live carrier calls | Disabled by default; only `mock-ghn` is available in demo mode. |
-| Authentication | External requests enter through API Gateway with JWT and permission context. |
-| Internal calls | Require the internal service token. |
-| Seller isolation | Every shipment query checks the authenticated Seller's shop ownership. |
-| Customer isolation | Tracking queries check order ownership in Order Service. |
-| Webhook safety | Token validation, schema validation and idempotent event persistence. |
-| Sensitive data | Do not log full phone numbers, addresses, tokens or raw request bodies. |
-| Database ownership | Shipping Service writes only to its own PostgreSQL database. |
-| Reversibility | Stop the process and reset the disposable demo database to remove the simulated journey. |
+| Concern            | Policy                                                                                   |
+| ------------------ | ---------------------------------------------------------------------------------------- |
+| Live carrier calls | Disabled by default; only `mock-ghn` is available in demo mode.                          |
+| Authentication     | External requests enter through API Gateway with JWT and permission context.             |
+| Internal calls     | Require the internal service token.                                                      |
+| Seller isolation   | Every shipment query checks the authenticated Seller's shop ownership.                   |
+| Customer isolation | Tracking queries check order ownership in Order Service.                                 |
+| Webhook safety     | Token validation, schema validation and idempotent event persistence.                    |
+| Sensitive data     | Do not log full phone numbers, addresses, tokens or raw request bodies.                  |
+| Database ownership | Shipping Service writes only to its own PostgreSQL database.                             |
+| Reversibility      | Stop the process and reset the disposable demo database to remove the simulated journey. |
 
 ## Testing strategy
 
