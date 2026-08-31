@@ -4,418 +4,256 @@
 
 # Shipping Service
 
-### Demo-first shipment orchestration for Bin E-Commerce
+### Server-side shipment orchestration for BIN E-Commerce
 
-Simulate a complete delivery journey — from pickup assignment to successful delivery — without creating a real shipment or charging a real shipping fee.
+[![Node.js 20+](https://img.shields.io/badge/Node.js-20%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![NestJS 11](https://img.shields.io/badge/NestJS-11-E0234E?logo=nestjs&logoColor=white)](https://nestjs.com/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Kafka](https://img.shields.io/badge/Apache%20Kafka-events-231F20?logo=apache-kafka&logoColor=white)](https://kafka.apache.org/)
 
-<p>
-  <img alt="NestJS 11" src="https://img.shields.io/badge/NestJS-11-E0234E?style=flat-square&logo=nestjs&logoColor=white" />
-  <img alt="TypeScript 5.7" src="https://img.shields.io/badge/TypeScript-5.7-3178C6?style=flat-square&logo=typescript&logoColor=white" />
-  <img alt="PostgreSQL 16" src="https://img.shields.io/badge/PostgreSQL-16-4169E1?style=flat-square&logo=postgresql&logoColor=white" />
-  <img alt="Apache Kafka" src="https://img.shields.io/badge/Apache%20Kafka-events-231F20?style=flat-square&logo=apachekafka&logoColor=white" />
-  <img alt="Mock GHN" src="https://img.shields.io/badge/provider-Mock%20GHN-111827?style=flat-square" />
-</p>
-
-<p>
-  <a href="#overview">Overview</a> ·
-  <a href="#quick-start">Quick start</a> ·
-  <a href="#architecture">Architecture</a> ·
-  <a href="#api-contract">API contract</a> ·
-  <a href="#see-it-work">See it work</a>
-</p>
+[Overview](#overview) · [Quick start](#quick-start) · [API](#api-surface) · [Architecture](#architecture)
 
 </div>
 
 ---
 
 > [!IMPORTANT]
-> This service is intentionally demo-safe. The default provider is `mock-ghn`: it does not call GHN, create real waybills, collect shipping fees, or transmit customer data to a carrier.
->
-> The service persists demo shipment state in PostgreSQL and publishes internal events through Kafka. To disable it, stop the local process or container. Demo data can be removed by resetting the service database.
+> This service currently targets **GHN Test** only. Keep `GHN_TOKEN` and `GHN_SHOP_ID` on the server, never commit them, and never expose them to the frontend. The service makes network calls to GHN and to internal Order/Seller services, writes shipment data to PostgreSQL, and publishes status events to Kafka.
 
 ## Overview
 
-An order platform needs to show what happens after checkout: the seller prepares the parcel, a courier picks it up, the shipment moves through transit points, and the customer receives it.
+Checkout, shipment creation, tracking, cancellation, label printing, and carrier callbacks need one consistent boundary. This service owns that boundary for BIN E-Commerce and keeps carrier credentials and provider-specific payloads away from the browser and other domains.
 
-Real carrier integration is not necessary for a local product demonstration. It introduces credentials, account approval, shipping fees, carrier availability and real customer addresses. Shipping Service provides the same application boundary with a deterministic Mock GHN provider, so Seller Center and Customer Web can demonstrate the complete journey safely.
+The current adapter is `GHN_TEST`. It validates GHN address codes, calculates shipping fees, creates orders, synchronizes provider status, accepts webhooks, prints labels, and stores an append-only shipment timeline.
 
-The provider boundary follows the concepts exposed by GHN — shipment creation, tracking code, status transitions and callbacks — while keeping the demo implementation independent from live carrier credentials. A real GHN adapter can be added later without changing the frontend contract.
+## What it provides
 
-## What this service owns
-
-| Responsibility                                | Shipping Service | Another service      |
-| --------------------------------------------- | ---------------- | -------------------- |
-| Shipment records and tracking codes           | Owns             | —                    |
-| Shipment status history                       | Owns             | —                    |
-| Demo courier position and route               | Owns             | —                    |
-| Order ownership and shop scope                | —                | Order Service        |
-| Seller/shop identity                          | —                | Seller Service       |
-| Product names, images and package dimensions  | —                | Product Service      |
-| Customer identity and saved address ownership | —                | Auth Service         |
-| In-app notifications and email                | —                | Notification Service |
-
-Shipping Service must not query another service's database. It receives the minimum required snapshot through explicit internal HTTP contracts or Kafka events.
+- GHN province, district, and ward master data with one-hour caching and in-flight request deduplication.
+- Shipping quotes using weight, package dimensions, declared value, COD amount, and GHN address codes.
+- Idempotent shipment creation using a stable `client_order_code`.
+- Seller actions: create, refresh, cancel, advance a demo shipment, and download a label.
+- Customer tracking with current location, route points, status, and shipment events.
+- GHN webhook processing and scheduled polling for non-terminal shipments.
+- PostgreSQL persistence for shipments and shipment events.
+- Kafka publication through a dedicated `src/kafka` module.
 
 ## Quick start
 
 ### Prerequisites
 
-- Node.js 20 or newer.
-- npm 10 or newer.
-- PostgreSQL 16 or newer.
-- Kafka available at `localhost:29092`, or another broker configured through `.env`.
+- Node.js 20 or newer
+- npm 10 or newer
+- PostgreSQL
+- Kafka, when event publishing is required
+- A GHN Test token and numeric shop ID
 
-### Local setup
+### Install
 
-```powershell
-cd services/shipping-service
+From the monorepo root:
+
+```bash
 npm install
-Copy-Item .env.example .env
+cd services/shipping-service
+cp .env.example .env
+```
+
+On PowerShell, use `Copy-Item .env.example .env` instead of `cp`.
+
+Fill in the GHN credentials and local infrastructure settings in `.env`. The adapter rejects production GHN URLs and formatted shop IDs such as `123456 - 9876543210`.
+
+### Run locally
+
+Start the shared infrastructure from the monorepo root when needed:
+
+```bash
+docker compose --env-file infra/docker/.env -f infra/docker/docker-compose.infra.yml up -d
+```
+
+Then start this service:
+
+```bash
+cd services/shipping-service
 npm run dev
 ```
 
-The planned local service endpoint is:
-
-```text
-http://localhost:3012/api/v1
-```
-
-Health check:
-
-```powershell
-curl http://localhost:3012/api/health
-```
-
-Development Swagger:
-
-```text
-http://localhost:3012/docs
-```
-
-> The service scaffold, migrations and controllers are implemented in the next delivery step. This README defines the service boundary and its demo contract first.
+The service listens on `http://localhost:3012` by default. In development, Swagger is available at `http://localhost:3012/api/docs`.
 
 ## Configuration
 
-Create `.env` from `.env.example`:
+| Variable                 | Required | Purpose                                                                                      |
+| ------------------------ | -------- | -------------------------------------------------------------------------------------------- |
+| `PORT`                   | No       | HTTP port. Defaults to `3012`.                                                               |
+| `POSTGRES_HOST`          | Yes      | PostgreSQL host.                                                                             |
+| `POSTGRES_PORT`          | Yes      | PostgreSQL port.                                                                             |
+| `POSTGRES_USER`          | Yes      | PostgreSQL user.                                                                             |
+| `POSTGRES_PASSWORD`      | Yes      | PostgreSQL password.                                                                         |
+| `POSTGRES_DB`            | Yes      | Shipping database name.                                                                      |
+| `KAFKA_BROKERS`          | No       | Comma-separated Kafka brokers.                                                               |
+| `KAFKA_CLIENT_ID`        | No       | Kafka client ID.                                                                             |
+| `KAFKA_GROUP_ID`         | No       | Kafka consumer group setting reserved for service integration.                               |
+| `ORDER_SERVICE_URL`      | Yes      | Internal Order Service URL.                                                                  |
+| `SELLER_SERVICE_URL`     | Yes      | Internal Seller Service URL.                                                                 |
+| `INTERNAL_SERVICE_TOKEN` | Yes      | Shared secret for internal shipment routes.                                                  |
+| `GHN_BASE_URL`           | Yes      | Must be `https://dev-online-gateway.ghn.vn` in the current phase.                            |
+| `GHN_TOKEN`              | Yes      | GHN Test API token.                                                                          |
+| `GHN_SHOP_ID`            | Yes      | Positive numeric GHN shop ID.                                                                |
+| `GHN_CLIENT_ID`          | No       | Kept for future GHN account/webhook integration; not used by the current fee/create adapter. |
+| `GHN_SERVICE_TYPE_ID`    | No       | GHN service type. Defaults to `2`.                                                           |
+| `GHN_REQUEST_TIMEOUT_MS` | No       | Upstream timeout. Defaults to `10000`.                                                       |
+| `SHIPPING_DEMO_MODE`     | No       | Enables the demo route-advance action. Keep it `false` in production.                        |
+| `MAP_DEFAULT_LATITUDE`   | No       | Fallback map latitude.                                                                       |
+| `MAP_DEFAULT_LONGITUDE`  | No       | Fallback map longitude.                                                                      |
 
-| Variable                  | Required               | Default            | Purpose                                    |
-| ------------------------- | ---------------------- | ------------------ | ------------------------------------------ |
-| `NODE_ENV`                | No                     | `development`      | Runtime mode and Swagger visibility.       |
-| `PORT`                    | No                     | `3012`             | HTTP port.                                 |
-| `DATABASE_URL`            | Yes                    | —                  | PostgreSQL connection string.              |
-| `DB_SYNCHRONIZE`          | No                     | `false`            | Use only with a disposable local database. |
-| `KAFKA_BROKERS`           | Yes                    | `localhost:29092`  | Comma-separated Kafka brokers.             |
-| `KAFKA_CLIENT_ID`         | No                     | `shipping-service` | Kafka client identifier.                   |
-| `KAFKA_GROUP_ID`          | No                     | `shipping-service` | Consumer group identifier.                 |
-| `SHIPPING_PROVIDER`       | No                     | `mock-ghn`         | Active provider; demo supports `mock-ghn`. |
-| `DEMO_STEP_DELAY_SECONDS` | No                     | `0`                | Delay between automatic simulation steps.  |
-| `WEBHOOK_SECRET`          | Yes for webhook routes | —                  | Secret for protected demo callbacks.       |
-| `MAP_DEFAULT_LATITUDE`    | No                     | `10.7769`          | Fallback latitude for demo coordinates.    |
-| `MAP_DEFAULT_LONGITUDE`   | No                     | `106.7009`         | Fallback longitude for demo coordinates.   |
+## API surface
 
-No live GHN token, ShopId or carrier credential is required for the demo provider.
+The application uses the global prefix `/api` and URI version `v1`.
 
-## See it work
+### Health and documentation
 
-```text
-Customer places a COD order
-        │
-        ▼
-Seller opens the order in Seller Center
-        │
-        ├─ Start processing
-        ├─ Mark parcel ready
-        └─ Create demo shipment
-                │
-                ▼
-        GHN-DEMO-XXXXXXXX
-                │
-                ├─ Pickup assigned
-                ├─ Courier picked up the parcel
-                ├─ Shipment in transit
-                └─ Delivered
-                        │
-                        ▼
-              Customer sees timeline + map
-```
+| Method | Endpoint         | Purpose                        |
+| ------ | ---------------- | ------------------------------ |
+| `GET`  | `/api/v1/health` | Lightweight liveness check.    |
+| `GET`  | `/api/docs`      | Swagger UI outside production. |
 
-Example shipment response:
+### GHN address master data
 
-```json
-{
-  "id": "shipment-demo-id",
-  "provider": "MOCK_GHN",
-  "trackingCode": "GHN-DEMO-8F3A21C9",
-  "status": "IN_TRANSIT",
-  "statusLabel": "In transit",
-  "currentLocation": {
-    "latitude": 10.7892,
-    "longitude": 106.6821,
-    "label": "District 3 transit hub"
-  },
-  "routePoints": [
-    {
-      "latitude": 10.8231,
-      "longitude": 106.6297,
-      "label": "Seller pickup point"
-    },
-    {
-      "latitude": 10.7892,
-      "longitude": 106.6821,
-      "label": "District 3 transit hub"
-    },
-    {
-      "latitude": 10.7769,
-      "longitude": 106.7009,
-      "label": "Customer delivery point"
-    }
-  ],
-  "estimatedDeliveryAt": "2026-08-30T18:00:00.000Z"
-}
-```
+These endpoints are owned by Shipping Service. The frontend does not call GHN directly.
+
+| Method | Endpoint                                              | Purpose                        |
+| ------ | ----------------------------------------------------- | ------------------------------ |
+| `GET`  | `/api/v1/shipping/locations/provinces`                | List GHN provinces.            |
+| `GET`  | `/api/v1/shipping/locations/districts?provinceId=202` | List districts for a province. |
+| `GET`  | `/api/v1/shipping/locations/wards?districtId=1442`    | List wards for a district.     |
+
+### Internal order orchestration
+
+These endpoints require `x-internal-service-token` matching `INTERNAL_SERVICE_TOKEN`.
+
+| Method | Endpoint                                        | Purpose                                                                   |
+| ------ | ----------------------------------------------- | ------------------------------------------------------------------------- |
+| `POST` | `/api/v1/internal/shipments/quotes`             | Calculate a quote using the shop pickup address and customer GHN address. |
+| `GET`  | `/api/v1/internal/shipments/:shipmentId`        | Read an internal shipment.                                                |
+| `POST` | `/api/v1/internal/shipments/:shipmentId/sync`   | Synchronize provider status.                                              |
+| `POST` | `/api/v1/internal/shipments/:shipmentId/cancel` | Cancel a shipment through GHN.                                            |
+
+### Seller shipment actions
+
+These endpoints use the authenticated seller context forwarded by the API Gateway.
+
+| Method | Endpoint                                               | Purpose                                   |
+| ------ | ------------------------------------------------------ | ----------------------------------------- |
+| `POST` | `/api/v1/seller/orders/:orderId/shipment`              | Create a shipment for the seller's order. |
+| `GET`  | `/api/v1/seller/orders/:orderId/shipment`              | Read the seller's shipment.               |
+| `POST` | `/api/v1/seller/orders/:orderId/shipment/refresh`      | Refresh status from GHN.                  |
+| `POST` | `/api/v1/seller/orders/:orderId/shipment/cancel`       | Cancel before carrier pickup.             |
+| `POST` | `/api/v1/seller/orders/:orderId/shipment/demo/advance` | Skip to the next demo route stage.        |
+| `GET`  | `/api/v1/seller/orders/:orderId/shipment/label`        | Download a PDF or printable HTML label.   |
+
+### Customer tracking and GHN callback
+
+| Method | Endpoint                           | Purpose                                       |
+| ------ | ---------------------------------- | --------------------------------------------- |
+| `GET`  | `/api/v1/orders/:orderId/tracking` | Read tracking for the authenticated customer. |
+| `POST` | `/api/v1/internal/webhooks/ghn`    | Receive and apply a GHN status callback.      |
 
 ## Architecture
 
 ```text
-┌──────────────────────┐
-│ Customer / Seller Web│
-└──────────┬───────────┘
-           │ authenticated request
-           ▼
-┌──────────────────────┐
-│ API Gateway :3000    │
-│ JWT + permissions     │
-└──────────┬───────────┘
-           │ user context + internal proxy
-           ▼
-┌──────────────────────┐
-│ Order Service         │
-│ order/shop fulfillment│
-└──────────┬───────────┘
-           │ create / read shipment
-           ▼
-┌──────────────────────────────────┐
-│ Shipping Service :3012           │
-│                                  │
-│  Shipment application service    │
-│        │                         │
-│        ├─ MockGhnProvider         │
-│        ├─ PostgreSQL              │
-│        └─ Kafka producer          │
-└────────┬─────────────────────────┘
-         │ shipment.status.updated
-         ├──────────────────────► Order Service
-         └──────────────────────► Notification Service
-                                      │
-                                      ├─ in-app notification
-                                      └─ customer email
+Order Service / Seller Service / Customer
+                    |
+                    v
+              API Gateway
+                    |
+                    v
+          Shipping Service :3012
+          |        |       |       |
+          |        |       |       +--> Kafka events
+          |        |       +----------> PostgreSQL
+          |        +------------------> Order/Seller clients
+          +---------------------------> GHN Test API
 ```
 
-The service is split into provider, application and infrastructure boundaries:
+The service keeps the application boundary separate from infrastructure and provider code:
 
 ```text
 src/
-├── common/                  # Configuration, security and shared errors
-├── database/                # Entities, migrations and PostgreSQL adapters
-├── modules/shipping/
-│   ├── controllers/         # HTTP and internal webhook boundaries
-│   ├── dto/                 # Validated request contracts
-│   ├── providers/           # ShippingProvider port and MockGhnProvider
-│   ├── repositories/        # Shipment and event persistence
-│   ├── services/            # State transitions and orchestration
-│   └── types/               # Provider and response contracts
-└── kafka/                   # Event publishing and consuming
+├── database/
+│   ├── entities/       # TypeORM persistence models
+│   ├── enums/          # Database-facing canonical status enum
+│   └── migrations/     # Explicit PostgreSQL schema changes
+├── kafka/              # Producer connection and shipment event publisher
+└── modules/shipping/
+    ├── clients/        # GHN, Order Service, and Seller Service clients
+    ├── controllers/    # HTTP boundaries
+    ├── dto/             # Request validation contracts
+    ├── providers/      # GHN adapter and status mapping
+    ├── repositories/   # Shipment database access
+    ├── services/       # Shipment state machine and orchestration
+    └── types/          # Internal shipping contracts
 ```
 
-## API contract
-
-### Internal shipment API
-
-These routes are called by trusted services and require the internal service token:
-
-```http
-POST /api/v1/internal/shipments
-GET  /api/v1/internal/shipments/:shipmentId
-POST /api/v1/internal/shipments/:shipmentId/advance
-POST /api/v1/internal/shipments/:shipmentId/cancel
-```
-
-Shipment creation is idempotent by `orderId + shopId`. A retry after a timeout returns the existing shipment instead of generating another tracking code.
-
-### Seller API through API Gateway
-
-```http
-POST /api/v1/seller/orders/:orderId/fulfillment/status
-POST /api/v1/seller/orders/:orderId/shipment
-POST /api/v1/seller/orders/:orderId/shipment/simulate-next
-GET  /api/v1/seller/orders/:orderId/shipment
-```
-
-Seller scope is resolved from the authenticated user. The browser must never provide an authoritative `shopId` in query parameters or request bodies.
-
-### Customer API through API Gateway
-
-```http
-GET /api/v1/orders/:orderId/tracking
-```
-
-Customer scope is resolved from the authenticated user. The response contains tracking information only for the customer's own order.
-
-### Demo callback
-
-```http
-POST /api/v1/internal/webhooks/mock-ghn/:webhookToken
-```
-
-The callback validates the token and payload, records the event before returning HTTP 200, and deduplicates retries by `providerEventKey`.
-
-## Shipment state machine
+### Shipment lifecycle
 
 ```text
-READY_TO_SHIP
-      │ create shipment
-      ▼
-PICKUP_ASSIGNED
-      │ advance
-      ▼
-PICKED_UP
-      │ advance
-      ▼
-IN_TRANSIT
-      │ advance
-      ▼
-DELIVERED
+Quote
+  -> Create shipment
+  -> READY_TO_SHIP
+  -> PICKUP_ASSIGNED
+  -> PICKED_UP
+  -> IN_TRANSIT
+  -> DELIVERED
 ```
 
-Failure paths are explicit and append-only:
+GHN webhooks and polling both use the same state transition path. Provider statuses are normalized into canonical `ShipmentStatus` values, and unique event keys protect the timeline from duplicate callbacks.
 
-- `FAILED` records provider or simulation failure with a reason.
-- `CANCELLED` is allowed only before the parcel is picked up.
-- A delivered shipment is terminal and cannot be advanced again.
-- Illegal transitions return a business error and do not create a history record.
+## Data model
 
-Order Service owns the shop-level fulfillment state. Shipping Service owns the carrier-facing shipment state. This separation prevents one shop from changing another shop's fulfillment in a multi-shop order.
+- `shipments` stores the provider reference, tracking ID, current canonical status, current location, route points, pickup address snapshot, and delivery estimate.
+- `shipment_events` stores append-only status history, provider event keys, source, location, and timestamps.
+- Historical address snapshots are preserved when a seller later changes the pickup address.
+- TypeORM synchronization is disabled; schema changes must be delivered through migrations.
 
-## Provider abstraction
+## GHN integration notes
 
-Application services depend on a provider port rather than a GHN SDK or HTTP client:
-
-```ts
-interface ShippingProvider {
-  createShipment(input: CreateShipmentInput): Promise<ProviderShipment>;
-  getShipment(trackingCode: string): Promise<ProviderShipment>;
-  cancelShipment(trackingCode: string): Promise<ProviderShipment>;
-  advanceDemoShipment(trackingCode: string): Promise<ProviderShipment>;
-}
-```
-
-`MockGhnProvider` is the default implementation. A future `GhnApiProvider` can implement the same port and use real GHN create-order, tracking and webhook operations without changing the Order Service or Web application contract.
-
-## Persistence model
-
-### `shipments`
-
-- `id`, `order_id`, `shop_id`.
-- `provider`, `tracking_code`, `status`.
-- `current_latitude`, `current_longitude`, `current_location_label`.
-- `route_points` as JSONB.
-- `estimated_delivery_at`, `created_at`, `updated_at`.
-- Unique constraint on `order_id + shop_id`.
-- Unique constraint on `provider + tracking_code`.
-
-### `shipment_events`
-
-- `id`, `shipment_id`, `provider_event_key`.
-- `from_status`, `to_status`, `reason`.
-- `latitude`, `longitude`, `location_label`.
-- `occurred_at`, `created_at`.
-- Unique index on `provider_event_key` for webhook retry safety.
-
-## Event contract
+The adapter uses these GHN Test endpoints:
 
 ```text
-shipment.status.updated
+POST /shiip/public-api/v2/shipping-order/fee
+POST /shiip/public-api/v2/shipping-order/create
+POST /shiip/public-api/v2/shipping-order/detail
+POST /shiip/public-api/v2/shipping-order/detail-by-client-code
+POST /shiip/public-api/v2/switch-status/cancel
+POST /shiip/public-api/v2/a5/gen-token
+GET  /a5/public-api/printA5?token=...
+GET  /shiip/public-api/master-data/province
+POST /shiip/public-api/master-data/district
+POST /shiip/public-api/master-data/ward
 ```
 
-Example event:
+Fee and create requests use gram weight, centimeter dimensions, GHN district IDs, and GHN ward codes. The service validates the selected address against cached GHN master data before calling fee or create APIs.
 
-```json
-{
-  "eventId": "shipment-status:shipment-demo-id:IN_TRANSIT",
-  "eventName": "shipment.status.updated",
-  "eventVersion": 1,
-  "source": "shipping-service",
-  "aggregateId": "shipment-demo-id",
-  "data": {
-    "shipmentId": "shipment-demo-id",
-    "orderId": "order-demo-id",
-    "shopId": "shop-demo-id",
-    "trackingCode": "GHN-DEMO-8F3A21C9",
-    "status": "IN_TRANSIT",
-    "statusLabel": "In transit",
-    "occurredAt": "2026-08-30T10:00:00.000Z",
-    "currentLocation": {
-      "latitude": 10.7892,
-      "longitude": 106.6821,
-      "label": "District 3 transit hub"
-    }
-  }
-}
+The route on the tracking map is a controlled demonstration route. GHN Test does not provide live driver GPS in this integration, so `demo/advance` exists for presentations and local workflow testing.
+
+## Development checks
+
+Run these commands from `services/shipping-service`:
+
+```bash
+npm run type-check
+npm run type-check:test
+npm run lint
+npm test
+npm run build
 ```
 
-Consumers must process the event idempotently by `eventId`. Notification Service should send customer notifications only after the shipment event has been persisted successfully.
+The unit tests cover GHN request headers and payloads, address validation, status normalization, label responses, business errors, and missing credentials.
 
-## Demo map
+## Related documentation
 
-The Web application can render shipment routes with Leaflet markers and polylines. OpenStreetMap tiles are suitable for local development when attribution is preserved; the public tile server is best-effort and should not be treated as a production SLA. See the [Leaflet Quick Start](https://leafletjs.com/examples/quick-start/index.html) and [OpenStreetMap Tile Usage Policy](https://operations.osmfoundation.org/policies/tiles/).
-
-The demo does not geocode real addresses. It uses seeded coordinates by city or a safe fallback coordinate, so the map remains deterministic and does not send customer PII to a geocoding provider.
-
-## Security and operations
-
-| Concern            | Policy                                                                                   |
-| ------------------ | ---------------------------------------------------------------------------------------- |
-| Live carrier calls | Disabled by default; only `mock-ghn` is available in demo mode.                          |
-| Authentication     | External requests enter through API Gateway with JWT and permission context.             |
-| Internal calls     | Require the internal service token.                                                      |
-| Seller isolation   | Every shipment query checks the authenticated Seller's shop ownership.                   |
-| Customer isolation | Tracking queries check order ownership in Order Service.                                 |
-| Webhook safety     | Token validation, schema validation and idempotent event persistence.                    |
-| Sensitive data     | Do not log full phone numbers, addresses, tokens or raw request bodies.                  |
-| Database ownership | Shipping Service writes only to its own PostgreSQL database.                             |
-| Reversibility      | Stop the process and reset the disposable demo database to remove the simulated journey. |
-
-## Testing strategy
-
-The service should be verified at four boundaries:
-
-- Unit tests for the state machine, provider mapping and route generation.
-- Repository tests for idempotent shipment creation and unique event handling.
-- Integration tests with PostgreSQL and Kafka for event publication and consumption.
-- API tests for permission checks, ownership isolation, invalid transitions and webhook retries.
-
-Minimum scenarios:
-
-1. Creating the same shipment twice returns one tracking code.
-2. A Seller cannot access another shop's shipment.
-3. A Customer cannot track another customer's order.
-4. Invalid state transitions are rejected without changing persistence.
-5. Replayed events do not duplicate history or notifications.
-6. `DELIVERED` is terminal.
-7. Missing address coordinates use the deterministic fallback.
-8. PostgreSQL/Kafka failures return safe errors without leaking secrets.
-
-## Roadmap
-
-1. Scaffold the NestJS service, configuration and health endpoint.
-2. Add PostgreSQL entities, migrations and repositories.
-3. Implement `MockGhnProvider` and the shipment state machine.
-4. Connect Order Service through internal APIs and Kafka events.
-5. Add Seller Center shipment actions and demo simulation controls.
-6. Add Customer tracking timeline and interactive map.
-7. Add shipment status notifications and customer email templates.
-8. Add an optional `GhnApiProvider` only when real carrier operations are required.
+- [Monorepo README](https://github.com/Bin-E-Commerce/Bin-Ecommerce)
+- [GHN shipping domain](https://github.com/Bin-E-Commerce/Bin-Ecommerce/blob/main/doc/domain/07-shipping-delivery.md)
+- [GHN developer documentation](https://api.ghn.vn/home/docs/detail?id=108)
 
 ## License
 
-Part of Bin E-Commerce. See the repository root for license information.
+This service is part of the BIN E-Commerce monorepo. Refer to the repository root for project licensing information.
