@@ -190,6 +190,7 @@ export class GhnTestProvider implements ShippingProvider {
     const providerOrderReference = this.createPartnerReference(
       input.orderNumber,
       input.shopId,
+      input.shipmentKind ?? "FORWARD",
     );
     const payload = await this.requestJson<UnknownRecord>(
       "/shiip/public-api/v2/shipping-order/create",
@@ -239,6 +240,7 @@ export class GhnTestProvider implements ShippingProvider {
       true,
     );
     const order = this.asRecord(payload.data);
+    const fee = this.asRecord(order.fee);
     const trackingId = this.text(order.order_code);
     if (!trackingId)
       throw new BadGatewayException("GHN trả về response thiếu mã vận đơn.");
@@ -253,6 +255,7 @@ export class GhnTestProvider implements ShippingProvider {
       currentLocation: this.pointForStatus(normalized.canonicalStatus),
       routePoints: this.demoRoutePoints,
       estimatedDeliveryAt: this.date(order.expected_delivery_time),
+      shippingFee: this.money(order.total_fee ?? fee.total),
     };
   }
 
@@ -521,8 +524,9 @@ export class GhnTestProvider implements ShippingProvider {
     };
   }
 
-  private createPartnerReference(orderNumber: string, shopId: string): string {
-    return `BIN-${orderNumber.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 180)}-${shopId.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 50)}`.slice(
+  private createPartnerReference(orderNumber: string, shopId: string, shipmentKind: "FORWARD" | "RETURN" = "FORWARD"): string {
+    const prefix = shipmentKind === "RETURN" ? "BIN-RET" : "BIN";
+    return `${prefix}-${orderNumber.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 180)}-${shopId.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 50)}`.slice(
       0,
       50,
     );

@@ -22,7 +22,7 @@ export class ShipmentRepository {
     shopId: string,
   ): Promise<Shipment | null> {
     return this.shipmentRepository.findOne({
-      where: { orderId, shopId },
+      where: { orderId, shopId, shipmentKind: "FORWARD" },
       relations: { events: true },
       order: { events: { occurredAt: "ASC" } },
     });
@@ -34,6 +34,15 @@ export class ShipmentRepository {
       where: { orderId },
       relations: { events: true },
       order: { createdAt: "ASC", events: { occurredAt: "ASC" } },
+    });
+  }
+
+  // Tìm shipment hoàn theo return request để retry không tạo thêm vận đơn.
+  findByReturnRequest(returnRequestId: string): Promise<Shipment | null> {
+    return this.shipmentRepository.findOne({
+      where: { returnRequestId, shipmentKind: "RETURN" },
+      relations: { events: true },
+      order: { events: { occurredAt: "ASC" } },
     });
   }
 

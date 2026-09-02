@@ -1,6 +1,6 @@
 // File này trả tracking shipment cho đúng owner customer đã được Order Service xác minh.
 
-import { Controller, Get, Headers, Param, ParseUUIDPipe } from '@nestjs/common';
+import { Controller, Get, Headers, Param, ParseUUIDPipe, Post } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { ShippingService } from '../services/shipping.service';
 
@@ -17,5 +17,14 @@ export class CustomerShipmentController {
     @Headers('x-user-id') ownerId: string,
   ) {
     return this.shippingService.getForCustomer(orderId, ownerId);
+  }
+
+  // Customer chỉ được bỏ qua từng chặng của reverse shipment sau khi Order Service xác minh ownership.
+  @Post('returns/:returnId/shipment/demo/advance')
+  advanceReturnDemo(
+    @Param('returnId', new ParseUUIDPipe()) returnId: string,
+    @Headers('x-user-id') ownerId: string,
+  ) {
+    return this.shippingService.advanceDemoForCustomerReturn(returnId, ownerId);
   }
 }

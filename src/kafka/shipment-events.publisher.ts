@@ -26,6 +26,8 @@ export class ShipmentEventsPublisher {
       data: {
         shipmentId: shipment.id,
         orderId: shipment.orderId,
+        shipmentKind: shipment.shipmentKind,
+        returnRequestId: shipment.returnRequestId,
         orderNumber: shipment.orderNumber,
         shopId: shipment.shopId,
         statusLabel: this.statusLabel(event.toStatus),

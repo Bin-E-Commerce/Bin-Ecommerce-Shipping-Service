@@ -5,7 +5,7 @@
 
 import { BadGatewayException, Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import type { ShippingOrderContext } from '../types/shipping.types';
+import type { ReturnShippingOrderContext, ShippingOrderContext } from '../types/shipping.types';
 
 @Injectable()
 export class OrderClient {
@@ -26,6 +26,21 @@ export class OrderClient {
     );
   }
 
+  // Báo Order Service hủy order sau khi provider xác nhận hủy vận đơn, đồng thời giải phóng tồn kho reservation.
+  async cancelSellerOrder(
+    orderId: string,
+    userId: string,
+    shopId: string,
+    reason: string,
+  ): Promise<void> {
+    await this.request<{ id: string }>(
+      `/api/v1/internal/orders/${orderId}/seller-cancel`,
+      { 'x-user-id': userId, 'x-shop-id': shopId },
+      'POST',
+      { reason },
+    );
+  }
+
   // Xác nhận customer sở hữu order trước khi trả tracking của tất cả shop trong order.
   async assertCustomerOwnsOrder(orderId: string, ownerId: string): Promise<void> {
     await this.request<{ orderId: string }>(
@@ -34,16 +49,55 @@ export class OrderClient {
     );
   }
 
+  // Lấy snapshot return đã được Order Service duyệt; Shipping Service không tự đọc database order.
+  async getReturnShippingContext(returnId: string): Promise<ReturnShippingOrderContext> {
+    return this.request<ReturnShippingOrderContext>(
+      `/api/v1/internal/orders/returns/${returnId}/shipping-context`,
+      {},
+    );
+  }
+
+  // Báo Order Service chuyển request sang RECEIVED sau khi kiện hoàn đã về shop.
+  async markReturnReceived(returnId: string): Promise<void> {
+    await this.request<{ id: string }>(
+      `/api/v1/internal/orders/${returnId}/return-received`,
+      {},
+      "POST",
+    );
+  }
+
+  // Đồng bộ trạng thái request sau khi Shipping Service đã lưu reverse shipment.
+  async markReturnInTransit(returnId: string): Promise<void> {
+    await this.request<{ id: string }>(
+      `/api/v1/internal/orders/${returnId}/return-in-transit`,
+      {},
+      "POST",
+    );
+  }
+
+  // Đồng bộ chi phí GHN chiều ngược về Order Service để tính đúng số tiền khách được hoàn.
+  async updateReturnShippingCost(returnId: string, amount: string): Promise<void> {
+    await this.request<{ id: string }>(
+      `/api/v1/internal/orders/returns/${returnId}/return-shipping-cost`,
+      {},
+      "POST",
+      { amount },
+    );
+  }
+
   // Chuẩn hóa lỗi HTTP nội bộ để không làm lộ response hoặc hostname của downstream service.
-  private async request<T>(path: string, contextHeaders: Record<string, string>): Promise<T> {
+  private async request<T>(path: string, contextHeaders: Record<string, string>, method = "GET", body?: unknown): Promise<T> {
     let response: Response;
     try {
       response = await fetch(`${this.targetBase}${path}`, {
+        method,
         headers: {
           accept: 'application/json',
+          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
           'x-internal-service-token': this.internalToken,
           ...contextHeaders,
         },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         signal: AbortSignal.timeout(5_000),
       });
     } catch {
