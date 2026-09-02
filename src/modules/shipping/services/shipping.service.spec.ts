@@ -16,7 +16,7 @@ import { ShipmentRepository } from "../repositories/shipment.repository";
 import { ShippingService } from "./shipping.service";
 import type { ShippingProvider } from "../types/shipping.types";
 
-describe("ShippingService cancellation consistency", () => {
+describe("ShippingService consistency", () => {
   let target: ShippingService;
   let mockConfig: DeepMocked<ConfigService>;
   let mockDataSource: DeepMocked<DataSource>;
@@ -58,12 +58,25 @@ describe("ShippingService cancellation consistency", () => {
   } as Shipment;
 
   beforeEach(() => {
-    mockConfig = {} as DeepMocked<ConfigService>;
+    mockConfig = { get: jest.fn() } as unknown as DeepMocked<ConfigService>;
     mockDataSource = { transaction: jest.fn() } as unknown as DeepMocked<DataSource>;
-    mockRepository = { getEntityRepository: jest.fn() } as unknown as DeepMocked<ShipmentRepository>;
-    mockProvider = { cancelShipment: jest.fn() } as unknown as DeepMocked<ShippingProvider>;
-    mockOrderClient = {} as DeepMocked<OrderClient>;
-    mockSellerShopClient = {} as DeepMocked<SellerShopClient>;
+    mockRepository = {
+      findByReturnRequest: jest.fn(),
+      getEntityRepository: jest.fn(),
+    } as unknown as DeepMocked<ShipmentRepository>;
+    mockProvider = {
+      cancelShipment: jest.fn(),
+      createShipment: jest.fn(),
+    } as unknown as DeepMocked<ShippingProvider>;
+    mockOrderClient = {
+      getReturnShippingContext: jest.fn(),
+      markReturnInTransit: jest.fn(),
+      updateReturnShippingCost: jest.fn(),
+    } as unknown as DeepMocked<OrderClient>;
+    mockSellerShopClient = {
+      getOwnedShopId: jest.fn(),
+      getDefaultPickupAddress: jest.fn(),
+    } as unknown as DeepMocked<SellerShopClient>;
     mockGhnMasterDataClient = {} as DeepMocked<GhnMasterDataClient>;
     mockEvents = { publish: jest.fn() } as unknown as DeepMocked<ShipmentEventsPublisher>;
     mockShipmentEntityRepository = { findOne: jest.fn() } as unknown as DeepMocked<Repository<Shipment>>;
@@ -138,5 +151,88 @@ describe("ShippingService cancellation consistency", () => {
     expect(syncOrder).toHaveBeenCalledTimes(1);
     expect(mockProvider.cancelShipment).not.toHaveBeenCalled();
     expect(mockDataSource.transaction).not.toHaveBeenCalled();
+  });
+
+  // Khi local transaction rollback, GHN phải được gọi compensation để không tồn tại vận đơn không có shipment local.
+  it("should cancel GHN when saving a return shipment fails", async () => {
+    // Arrange
+    mockConfig.get.mockReturnValue("development");
+    mockSellerShopClient.getOwnedShopId.mockResolvedValue("shop-1");
+    mockSellerShopClient.getDefaultPickupAddress.mockResolvedValue({
+      id: "pickup-1",
+      contactName: "Shop",
+      phone: "0900000000",
+      addressLine: "123 Shop Street",
+      ghnProvinceId: 202,
+      ghnProvinceName: "Ho Chi Minh",
+      ghnDistrictId: 1442,
+      ghnDistrictName: "District 1",
+      ghnWardCode: "20101",
+      ghnWardName: "Ben Nghe",
+    } as never);
+    mockRepository.findByReturnRequest.mockResolvedValue(null);
+    mockOrderClient.getReturnShippingContext.mockResolvedValue({
+      returnId: "return-1",
+      orderId: "order-1",
+      orderNumber: "BIN-0001",
+      ownerId: "customer-1",
+      shopId: "shop-1",
+      shippingAddress: {
+        contactName: "Customer",
+        phone: "0910000000",
+        addressLine: "456 Customer Street",
+        province: "Ho Chi Minh",
+        district: "District 1",
+        ward: "Ben Nghe",
+        ghnAddress: {
+          provinceId: 202,
+          districtId: 1442,
+          wardCode: "20101",
+          districtName: "District 1",
+          wardName: "Ben Nghe",
+        },
+      },
+      items: [{
+        productId: "product-1",
+        sku: "SKU-1",
+        productName: "Product 1",
+        imageUrl: null,
+        unitPrice: "100000.00",
+        quantity: 1,
+        lineTotal: "100000.00",
+        packageWeightGrams: 500,
+        packageLengthCm: 20,
+        packageWidthCm: 15,
+        packageHeightCm: 10,
+      }],
+    });
+    mockProvider.createShipment.mockResolvedValue({
+      providerOrderReference: "BIN-RET-BIN-0001-shop-1",
+      trackingId: "return-tracking-1",
+      providerStatusCode: null,
+      providerStatusText: "ready_to_pick",
+      status: ShipmentStatus.READY_TO_SHIP,
+      currentLocation: { latitude: 10.7769, longitude: 106.7009, label: "GHN" },
+      routePoints: [{ latitude: 10.7769, longitude: 106.7009, label: "GHN" }],
+      estimatedDeliveryAt: null,
+      shippingFee: "12000.00",
+    });
+    mockOrderClient.updateReturnShippingCost.mockResolvedValue();
+    const databaseError = new Error("shipment insert failed");
+    mockDataSource.transaction.mockRejectedValue(databaseError);
+    const currentUser = {
+      userId: "seller-1",
+      email: "seller@example.com",
+      permissions: ["seller.shipping.manage"],
+    };
+
+    // Act
+    const operation = target.createReturnForSeller("return-1", currentUser);
+
+    // Assert
+    await expect(operation).rejects.toBe(databaseError);
+    expect(mockProvider.cancelShipment).toHaveBeenCalledWith("return-tracking-1");
+    expect(mockProvider.cancelShipment).toHaveBeenCalledTimes(1);
+    expect(mockDataSource.transaction).toHaveBeenCalledTimes(1);
   });
 });
