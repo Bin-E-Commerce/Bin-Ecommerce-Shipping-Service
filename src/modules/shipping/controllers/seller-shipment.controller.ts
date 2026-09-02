@@ -1,10 +1,11 @@
 // Public Seller shipment actions: tạo, làm mới, hủy đủ điều kiện và in nhãn GHN Test.
 
-import { Controller, Get, Headers, Param, ParseUUIDPipe, Post, Res } from "@nestjs/common";
+import { Body, Controller, Get, Headers, Param, ParseUUIDPipe, Post, Res } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import type { Response } from "express";
 import type { CurrentSellerContext } from "../types/shipping.types";
 import { ShippingService } from "../services/shipping.service";
+import { CancelShipmentDto } from "../dto/cancel-shipment.dto";
 
 @ApiTags("seller-shipments")
 @ApiBearerAuth()
@@ -32,8 +33,25 @@ export class SellerShipmentController {
 
   // Hủy qua GHN chỉ khi carrier chưa lấy hàng.
   @Post(":orderId/shipment/cancel")
-  cancel(@Param("orderId", new ParseUUIDPipe()) orderId: string, @Headers() headers: Record<string, unknown>) {
-    return this.shippingService.cancelForSeller(orderId, this.buildContext(headers));
+  cancel(
+    @Param("orderId", new ParseUUIDPipe()) orderId: string,
+    @Body() dto: CancelShipmentDto,
+    @Headers() headers: Record<string, unknown>,
+  ) {
+    return this.shippingService.cancelForSeller(
+      orderId,
+      this.buildContext(headers),
+      dto.reason,
+    );
+  }
+
+  // Seller tạo vận đơn hoàn sau khi request đã được duyệt; service scope bằng seller session.
+  @Post("returns/:returnId/shipment")
+  createReturn(
+    @Param("returnId", new ParseUUIDPipe()) returnId: string,
+    @Headers() headers: Record<string, unknown>,
+  ) {
+    return this.shippingService.createReturnForSeller(returnId, this.buildContext(headers));
   }
 
   // Bỏ qua một chặng để trình diễn lộ trình trong môi trường GHN Test.

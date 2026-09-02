@@ -1,6 +1,7 @@
 // Điều phối quote, tạo shipment, đồng bộ GHN và bảo vệ state machine theo shop scope.
 
 import {
+  BadGatewayException,
   BadRequestException,
   ConflictException,
   ForbiddenException,
@@ -27,6 +28,7 @@ import type {
   GhnProvinceOption,
   GhnWardOption,
   ProviderShipmentStatus,
+  ReturnShippingOrderContext,
   ShippingProvider,
   ShippingQuote,
   ShippingOrderContext,
@@ -75,6 +77,14 @@ const DEMO_STATUS_SEQUENCE: ShipmentStatus[] = [
   ShipmentStatus.DELIVERED,
 ];
 
+const DEMO_RETURN_STATUS_SEQUENCE: ShipmentStatus[] = [
+  ShipmentStatus.READY_TO_SHIP,
+  ShipmentStatus.PICKUP_ASSIGNED,
+  ShipmentStatus.PICKED_UP,
+  ShipmentStatus.IN_TRANSIT,
+  ShipmentStatus.RETURNED,
+];
+
 const DEMO_STATUS_REASONS: Record<ShipmentStatus, string> = {
   [ShipmentStatus.READY_TO_SHIP]:
     "Shop đã xác nhận kiện hàng sẵn sàng bàn giao.",
@@ -108,7 +118,9 @@ export class ShippingService {
     private readonly events: ShipmentEventsPublisher,
   ) {}
 
-  // Quote luôn enrich pickup address từ Seller Service, browser không được gửi địa chỉ nguồn.
+  // Quote luôn enrich địa chỉ shop từ Seller Service, browser không được gửi địa chỉ nguồn.
+  // Quote RETURN dùng địa chỉ customer trong input làm điểm gửi và địa chỉ shop làm điểm nhận,
+  // để GHN tính đúng chi phí chiều ngược thay vì lấy phí giao hàng chiều đi.
   async calculateQuote(
     input: CalculateShippingQuoteDto,
   ): Promise<ShippingQuote> {
@@ -116,11 +128,12 @@ export class ShippingService {
       input.shopId,
     );
     const pickupAddress = this.toShippingAddress(pickup);
-    const destination = this.ensureDestination(input.to);
+    const customerAddress = this.ensureDestination(input.to);
+    const isReturn = input.shipmentKind === "RETURN";
     return this.provider.calculateFee({
       shopId: input.shopId,
-      from: pickupAddress,
-      to: destination,
+      from: isReturn ? customerAddress : pickupAddress,
+      to: isReturn ? pickupAddress : customerAddress,
       weightGrams: input.weightGrams,
       lengthCm: input.lengthCm,
       widthCm: input.widthCm,
@@ -153,7 +166,9 @@ export class ShippingService {
     this.ensureSellerContext(currentUser, true);
     const shopId = await this.sellerShopClient.getOwnedShopId(currentUser);
     const existing = await this.repository.findByOrderAndShop(orderId, shopId);
-    if (existing) return this.toResponse(existing);
+    if (existing) {
+      return this.toResponse(existing);
+    }
 
     const order = await this.orderClient.getSellerShippingContext(
       orderId,
@@ -223,6 +238,8 @@ export class ShippingService {
         orderId,
         orderNumber: order.orderNumber,
         shopId,
+        shipmentKind: "FORWARD",
+        returnRequestId: null,
         sellerUserId: currentUser.userId,
         customerUserId: order.ownerId,
         provider: GHN_PROVIDER,
@@ -263,6 +280,98 @@ export class ShippingService {
     return this.toResponse(transition.shipment);
   }
 
+  // Tạo reverse shipment từ customer về đúng shop; idempotency dựa trên returnRequestId.
+  async createReturnForSeller(returnRequestId: string, currentUser: CurrentSellerContext): Promise<ShipmentResponse> {
+    this.ensureSellerContext(currentUser, true);
+    const shopId = await this.sellerShopClient.getOwnedShopId(currentUser);
+    const existing = await this.repository.findByReturnRequest(returnRequestId);
+    if (existing) {
+      if (![ShipmentStatus.RETURNED, ShipmentStatus.CANCELLED, ShipmentStatus.FAILED].includes(existing.status)) {
+        await this.orderClient.markReturnInTransit(returnRequestId);
+      }
+      return this.toResponse(existing);
+    }
+    const context = await this.orderClient.getReturnShippingContext(returnRequestId);
+    if (context.shopId !== shopId) throw new NotFoundException("Yêu cầu hoàn không thuộc shop hiện tại.");
+    const pickupAddress = this.toCustomerAddress(context.shippingAddress as unknown as Record<string, unknown>);
+    const shopAddress = this.toShippingAddress(await this.sellerShopClient.getDefaultPickupAddress(shopId));
+    const value = context.items.reduce((total, item) => total + Number(item.lineTotal), 0);
+    const providerShipment = await this.provider.createShipment({
+      orderId: context.orderId,
+      orderNumber: context.orderNumber,
+      shopId,
+      pickupAddress,
+      shippingAddress: shopAddress,
+      items: context.items,
+      value,
+      codAmount: 0,
+      shipmentKind: "RETURN",
+    });
+    // Không cho phép phí thực tế rỗng ghi đè phí quote đã chốt; GHN phải trả total_fee cho vận đơn hoàn.
+    // Nếu provider thiếu phí, hủy vận đơn vừa tạo để seller có thể thử lại mà không sinh dữ liệu lệch.
+    if (!providerShipment.shippingFee || Number(providerShipment.shippingFee) <= 0) {
+      await this.provider.cancelShipment(providerShipment.trackingId).catch(() => undefined);
+      throw new BadGatewayException("GHN không trả về chi phí vận chuyển hoàn hàng.");
+    }
+    // GHN trả total_fee theo đúng tuyến customer -> shop; hủy provider nếu Order Service không ghi nhận được chi phí.
+    try {
+      await this.orderClient.updateReturnShippingCost(
+        returnRequestId,
+        providerShipment.shippingFee ?? "0.00",
+      );
+    } catch (error) {
+      await this.provider.cancelShipment(providerShipment.trackingId).catch(() => undefined);
+      throw error;
+    }
+    const transition = await this.dataSource.transaction(async (manager) => {
+      const shipmentRepository = manager.getRepository(Shipment);
+      const eventRepository = manager.getRepository(ShipmentEvent);
+      const shipment = shipmentRepository.create({
+        orderId: context.orderId,
+        orderNumber: context.orderNumber,
+        shopId,
+        shipmentKind: "RETURN",
+        returnRequestId,
+        sellerUserId: currentUser.userId,
+        customerUserId: context.ownerId,
+        provider: GHN_PROVIDER,
+        providerOrderReference: providerShipment.providerOrderReference,
+        providerTrackingId: providerShipment.trackingId,
+        providerStatusCode: providerShipment.providerStatusCode,
+        providerStatusText: providerShipment.providerStatusText,
+        lastProviderSyncedAt: new Date(),
+        pickupAddressSnapshot: { ...pickupAddress },
+        trackingCode: providerShipment.trackingId,
+        status: providerShipment.status,
+        currentLatitude: String(providerShipment.currentLocation.latitude),
+        currentLongitude: String(providerShipment.currentLocation.longitude),
+        currentLocationLabel: providerShipment.currentLocation.label,
+        routePoints: providerShipment.routePoints,
+        estimatedDeliveryAt: providerShipment.estimatedDeliveryAt,
+      });
+      const saved = await shipmentRepository.save(shipment);
+      const event = eventRepository.create({
+        shipmentId: saved.id,
+        providerEventKey: `create:return:${returnRequestId}`,
+        fromStatus: null,
+        toStatus: saved.status,
+        reason: "Tạo vận đơn hoàn GHN Test thành công.",
+        latitude: saved.currentLatitude,
+        longitude: saved.currentLongitude,
+        locationLabel: saved.currentLocationLabel,
+        providerStatusCode: saved.providerStatusCode,
+        eventSource: "SYSTEM",
+        occurredAt: new Date(),
+      });
+      await eventRepository.save(event);
+      saved.events = [event];
+      return { shipment: saved, event };
+    });
+    await this.events.publish(transition.shipment, transition.event);
+    await this.orderClient.markReturnInTransit(returnRequestId);
+    return this.toResponse(transition.shipment);
+  }
+
   // Seller chỉ đọc shipment thuộc shop được resolve từ context hiện tại.
   async getForSeller(
     orderId: string,
@@ -298,7 +407,7 @@ export class ShippingService {
     const shopId = await this.sellerShopClient.getOwnedShopId(currentUser);
     const shipment = await this.repository
       .getEntityRepository()
-      .findOne({ where: { orderId, shopId } });
+      .findOne({ where: { orderId, shopId, shipmentKind: "FORWARD" } });
     if (!shipment)
       throw new NotFoundException("Chưa có vận đơn của shop cho đơn hàng này.");
     return shipment;
@@ -308,11 +417,24 @@ export class ShippingService {
   async cancelForSeller(
     orderId: string,
     currentUser: CurrentSellerContext,
+    reason: string,
   ): Promise<ShipmentResponse> {
+    this.ensureSellerContext(currentUser, true);
+    const normalizedReason = reason?.trim();
+    if (!normalizedReason) {
+      throw new BadRequestException("Seller phải nhập lý do hủy vận đơn.");
+    }
+    const shopId = await this.sellerShopClient.getOwnedShopId(currentUser);
     const shipment = await this.getSellerShipmentEntity(orderId, currentUser);
     return this.cancelInternal(
       shipment.id,
-      "Seller hủy vận đơn trước khi GHN lấy hàng.",
+      normalizedReason,
+      () => this.orderClient.cancelSellerOrder(
+        orderId,
+        currentUser.userId,
+        shopId,
+        normalizedReason,
+      ),
     );
   }
 
@@ -323,10 +445,44 @@ export class ShippingService {
   ): Promise<ShipmentResponse> {
     const shipment = await this.getSellerShipmentEntity(orderId, currentUser);
     this.ensureDemoMode();
-    const result = await this.dataSource.transaction(async (manager) => {
-      const locked = await this.lockShipment(manager, shipment.id);
-      const currentIndex = DEMO_STATUS_SEQUENCE.indexOf(locked.status);
-      const nextStatus = DEMO_STATUS_SEQUENCE[currentIndex + 1];
+    const result = await this.advanceDemoShipment(shipment.id, DEMO_STATUS_SEQUENCE);
+    await this.events.publish(result.shipment, result.event);
+    return this.toResponse(result.shipment);
+  }
+
+  // Customer chỉ được điều khiển reverse shipment thuộc order của mình; bước cuối đồng bộ request sang RECEIVED.
+  async advanceDemoForCustomerReturn(returnRequestId: string, ownerId: string): Promise<ShipmentResponse> {
+    if (!ownerId)
+      throw new UnauthorizedException("Bạn cần đăng nhập để mô phỏng hành trình hoàn hàng.");
+    const shipment = await this.repository.findByReturnRequest(returnRequestId);
+    if (!shipment)
+      throw new NotFoundException("Chưa có vận đơn hoàn hàng để mô phỏng.");
+    if (shipment.shipmentKind !== "RETURN" || shipment.customerUserId !== ownerId)
+      throw new ForbiddenException("Bạn không có quyền mô phỏng vận đơn hoàn hàng này.");
+    await this.orderClient.assertCustomerOwnsOrder(shipment.orderId, ownerId);
+    if (shipment.status === ShipmentStatus.RETURNED && shipment.returnRequestId) {
+      await this.orderClient.markReturnReceived(shipment.returnRequestId);
+      return this.toResponse(shipment);
+    }
+
+    this.ensureDemoMode();
+    const result = await this.advanceDemoShipment(shipment.id, DEMO_RETURN_STATUS_SEQUENCE);
+    await this.events.publish(result.shipment, result.event);
+    if (result.shipment.status === ShipmentStatus.RETURNED && result.shipment.returnRequestId) {
+      await this.orderClient.markReturnReceived(result.shipment.returnRequestId);
+    }
+    return this.toResponse(result.shipment);
+  }
+
+  // Dùng chung transaction lock và event audit cho demo forward và demo reverse shipment.
+  private async advanceDemoShipment(
+    shipmentId: string,
+    sequence: ShipmentStatus[],
+  ): Promise<{ shipment: Shipment; event: ShipmentEvent }> {
+    return this.dataSource.transaction(async (manager) => {
+      const locked = await this.lockShipment(manager, shipmentId);
+      const currentIndex = sequence.indexOf(locked.status);
+      const nextStatus = sequence[currentIndex + 1];
       if (currentIndex < 0 || nextStatus === undefined)
         throw new ConflictException(
           "Đơn demo không thể chuyển tiếp từ trạng thái hiện tại.",
@@ -335,7 +491,7 @@ export class ShippingService {
       // Shipment cũ có thể chứa route lỗi; chỉ dùng route đã chuẩn hóa để không ghi chuỗi vào cột numeric.
       const normalizedRoute = this.normalizeRoutePoints(locked.routePoints);
       const routePoints =
-        normalizedRoute && normalizedRoute.length >= DEMO_STATUS_SEQUENCE.length
+        normalizedRoute && normalizedRoute.length >= sequence.length
           ? normalizedRoute
           : this.buildDemoRoute(locked);
       const currentPoint = routePoints[currentIndex + 1] ?? routePoints.at(-1);
@@ -367,8 +523,6 @@ export class ShippingService {
       saved.events = [...locked.events, event];
       return { shipment: saved, event };
     });
-    await this.events.publish(result.shipment, result.event);
-    return this.toResponse(result.shipment);
   }
 
   // Customer chỉ nhận tracking sau khi Order Service xác nhận ownership.
@@ -407,6 +561,7 @@ export class ShippingService {
   async cancelInternal(
     shipmentId: string,
     reason = "Hủy vận đơn trước khi lấy hàng.",
+    afterProviderCancellation?: () => Promise<void>,
   ): Promise<ShipmentResponse> {
     const shipment = await this.repository
       .getEntityRepository()
@@ -424,6 +579,7 @@ export class ShippingService {
       );
     }
     await this.provider.cancelShipment(shipment.providerTrackingId);
+    if (afterProviderCancellation) await afterProviderCancellation();
     const transition = await this.dataSource.transaction(async (manager) => {
       const locked = await this.lockShipment(manager, shipmentId);
       if (locked.status === ShipmentStatus.CANCELLED)
@@ -617,6 +773,13 @@ export class ShippingService {
       return { shipment: saved, event };
     });
     if (result.event) await this.events.publish(result.shipment, result.event);
+    if (
+      result.shipment.shipmentKind === "RETURN" &&
+      result.shipment.returnRequestId &&
+      result.shipment.status === ShipmentStatus.RETURNED
+    ) {
+      await this.orderClient.markReturnReceived(result.shipment.returnRequestId);
+    }
     return result.shipment;
   }
 
@@ -835,6 +998,20 @@ export class ShippingService {
     };
   }
 
+  // Chuẩn hóa snapshot địa chỉ customer về contract GHN; địa chỉ được chụp từ order, không đọc lại profile hiện tại.
+  private toCustomerAddress(input: Record<string, unknown>): ShippingOrderContext["shippingAddress"] {
+    const address = {
+      contactName: String(input.contactName ?? input.fullName ?? "Người nhận"),
+      phone: String(input.phone ?? ""),
+      addressLine: String(input.addressLine ?? input.street ?? ""),
+      province: String(input.province ?? input.ghnProvinceName ?? ""),
+      district: String(input.district ?? input.ghnDistrictName ?? ""),
+      ward: String(input.ward ?? input.ghnWardName ?? ""),
+      ghnAddress: input.ghnAddress as ShippingOrderContext["shippingAddress"]["ghnAddress"],
+    };
+    return this.ensureDestination(address);
+  }
+
   // Chỉ cho quote và create shipment đi tiếp khi destination có đủ mã GHN đã chọn từ frontend.
   private ensureDestination(
     input: ShippingOrderContext["shippingAddress"],
@@ -875,6 +1052,8 @@ export class ShippingService {
     return {
       id: shipment.id,
       orderId: shipment.orderId,
+      shipmentKind: shipment.shipmentKind,
+      returnRequestId: shipment.returnRequestId,
       provider: GHN_PROVIDER,
       trackingCode: shipment.providerTrackingId,
       providerStatusCode: shipment.providerStatusCode,

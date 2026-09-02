@@ -5,6 +5,8 @@ import { ShipmentStatus } from "../../../database/enums/shipment-status.enum";
 export interface ShipmentResponse {
   id: string;
   orderId: string;
+  shipmentKind: "FORWARD" | "RETURN";
+  returnRequestId: string | null;
   provider: "GHN_TEST";
   trackingCode: string;
   providerStatusCode: number | null;

@@ -68,6 +68,16 @@ export interface ShippingOrderContext {
   }>;
 }
 
+export interface ReturnShippingOrderContext {
+  returnId: string;
+  orderId: string;
+  orderNumber: string;
+  ownerId: string;
+  shopId: string;
+  shippingAddress: ShippingAddress;
+  items: ShippingOrderContext["items"];
+}
+
 export interface CurrentSellerContext {
   userId: string;
   email: string;
@@ -120,6 +130,7 @@ export interface CreateShipmentInput {
   items: ShippingOrderContext["items"];
   value: number;
   codAmount: number;
+  shipmentKind?: "FORWARD" | "RETURN";
 }
 
 export interface CreatedShipment {
@@ -131,6 +142,7 @@ export interface CreatedShipment {
   currentLocation: RoutePoint;
   routePoints: RoutePoint[];
   estimatedDeliveryAt: Date | null;
+  shippingFee?: string;
 }
 
 export interface ProviderShipmentStatus {

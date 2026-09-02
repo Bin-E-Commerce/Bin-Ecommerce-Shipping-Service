@@ -16,7 +16,7 @@ import { ShipmentEvent } from "./shipment-event.entity";
 
 // Map bảng shipments với các cột snapshot và quan hệ append-only shipment events.
 @Entity({ name: "shipments" })
-@Index("uq_shipments_order_shop", ["orderId", "shopId"], { unique: true })
+@Index("uq_shipments_order_shop_kind", ["orderId", "shopId", "shipmentKind"], { unique: true })
 @Index("uq_shipments_provider_tracking", ["provider", "trackingCode"], {
   unique: true,
 })
@@ -33,6 +33,12 @@ export class Shipment {
 
   @Column({ name: "shop_id", type: "uuid" })
   shopId!: string;
+
+  @Column({ name: "shipment_kind", type: "varchar", length: 16, default: "FORWARD" })
+  shipmentKind!: "FORWARD" | "RETURN";
+
+  @Column({ name: "return_request_id", type: "uuid", nullable: true })
+  returnRequestId!: string | null;
 
   @Column({ name: "seller_user_id", type: "uuid" })
   sellerUserId!: string;
