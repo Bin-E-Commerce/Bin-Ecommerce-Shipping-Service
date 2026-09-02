@@ -67,10 +67,12 @@ describe("ShippingService consistency", () => {
     mockProvider = {
       cancelShipment: jest.fn(),
       createShipment: jest.fn(),
+      getShipment: jest.fn(),
     } as unknown as DeepMocked<ShippingProvider>;
     mockOrderClient = {
       getReturnShippingContext: jest.fn(),
       markReturnInTransit: jest.fn(),
+      markReturnReceived: jest.fn(),
       updateReturnShippingCost: jest.fn(),
     } as unknown as DeepMocked<OrderClient>;
     mockSellerShopClient = {
@@ -234,5 +236,79 @@ describe("ShippingService consistency", () => {
     expect(mockProvider.cancelShipment).toHaveBeenCalledWith("return-tracking-1");
     expect(mockProvider.cancelShipment).toHaveBeenCalledTimes(1);
     expect(mockDataSource.transaction).toHaveBeenCalledTimes(1);
+  });
+
+  // Reverse shipment phải đi qua state machine riêng để RETURNING và RETURNED
+  // được lưu đúng, đồng thời đồng bộ đúng mốc xử lý sang Order Service.
+  it("should advance reverse shipment through RETURNING and RETURNED", async () => {
+    // Arrange
+    const reverseShipment = {
+      ...shipment,
+      shipmentKind: "RETURN" as const,
+      returnRequestId: "return-1",
+      status: ShipmentStatus.IN_TRANSIT,
+      events: [],
+    } as Shipment;
+    const shipmentRepository = {
+      createQueryBuilder: jest.fn().mockReturnValue({
+        where: jest.fn().mockReturnThis(),
+        setLock: jest.fn().mockReturnThis(),
+        getOne: jest.fn().mockResolvedValue(reverseShipment),
+      }),
+      save: jest.fn(async (entity: Shipment) => entity),
+    };
+    const eventRepository = {
+      find: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn().mockResolvedValue(null),
+      create: jest.fn((event: Partial<ShipmentEvent>) => ({
+        id: `event-${event.toStatus}`,
+        ...event,
+      })),
+      save: jest.fn(async (event: ShipmentEvent) => event),
+    };
+    const manager = {
+      getRepository: jest.fn((entity: typeof Shipment | typeof ShipmentEvent) =>
+        entity === Shipment ? shipmentRepository : eventRepository,
+      ),
+    };
+    mockDataSource.transaction.mockImplementation(async (callback) =>
+      (callback as unknown as (value: unknown) => Promise<unknown>)(manager),
+    );
+    mockShipmentEntityRepository.findOne.mockResolvedValue(reverseShipment);
+    mockProvider.getShipment
+      .mockResolvedValueOnce({
+        trackingId: "return-tracking-1",
+        providerOrderReference: "return-order-1",
+        providerStatusCode: 45,
+        providerStatusText: "returning",
+        status: ShipmentStatus.RETURNING,
+        currentLocation: null,
+        estimatedDeliveryAt: null,
+        occurredAt: new Date("2026-09-03T10:01:00.000Z"),
+        reason: "Đang hoàn về shop",
+      })
+      .mockResolvedValueOnce({
+        trackingId: "return-tracking-1",
+        providerOrderReference: "return-order-1",
+        providerStatusCode: 46,
+        providerStatusText: "returned",
+        status: ShipmentStatus.RETURNED,
+        currentLocation: null,
+        estimatedDeliveryAt: null,
+        occurredAt: new Date("2026-09-03T10:02:00.000Z"),
+        reason: "Đã hoàn về shop",
+      });
+
+    // Act
+    const returning = await target.syncInternal("shipment-1");
+    const returned = await target.syncInternal("shipment-1");
+
+    // Assert
+    expect(returning.status).toBe(ShipmentStatus.RETURNING);
+    expect(returned.status).toBe(ShipmentStatus.RETURNED);
+    expect(mockOrderClient.markReturnInTransit).toHaveBeenCalledWith("return-1");
+    expect(mockOrderClient.markReturnReceived).toHaveBeenCalledWith("return-1");
+    expect(mockOrderClient.markReturnInTransit).toHaveBeenCalledTimes(1);
+    expect(mockOrderClient.markReturnReceived).toHaveBeenCalledTimes(1);
   });
 });

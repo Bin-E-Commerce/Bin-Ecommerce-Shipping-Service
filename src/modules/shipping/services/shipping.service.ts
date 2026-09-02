@@ -69,6 +69,18 @@ const FORWARD_STATUS_RANK: Partial<Record<ShipmentStatus, number>> = {
   [ShipmentStatus.DELIVERED]: 50,
 };
 
+// Reverse shipment có vòng đời riêng: sau khi rời shop, kiện hàng chuyển sang
+// RETURNING trước khi kết thúc ở RETURNED. Tách rank này khỏi chiều giao để
+// webhook GHN không bị từ chối chỉ vì RETURNING/RETURNED không thuộc forward flow.
+const RETURN_STATUS_RANK: Partial<Record<ShipmentStatus, number>> = {
+  [ShipmentStatus.READY_TO_SHIP]: 10,
+  [ShipmentStatus.PICKUP_ASSIGNED]: 20,
+  [ShipmentStatus.PICKED_UP]: 30,
+  [ShipmentStatus.IN_TRANSIT]: 40,
+  [ShipmentStatus.RETURNING]: 50,
+  [ShipmentStatus.RETURNED]: 60,
+};
+
 const DEMO_STATUS_SEQUENCE: ShipmentStatus[] = [
   ShipmentStatus.READY_TO_SHIP,
   ShipmentStatus.PICKUP_ASSIGNED,
@@ -82,6 +94,7 @@ const DEMO_RETURN_STATUS_SEQUENCE: ShipmentStatus[] = [
   ShipmentStatus.PICKUP_ASSIGNED,
   ShipmentStatus.PICKED_UP,
   ShipmentStatus.IN_TRANSIT,
+  ShipmentStatus.RETURNING,
   ShipmentStatus.RETURNED,
 ];
 
@@ -816,7 +829,12 @@ export class ShippingService {
       const eventRepository = manager.getRepository(ShipmentEvent);
       const previousStatus = shipment.status;
       const nextStatus =
-        update.status && this.canTransition(previousStatus, update.status)
+        update.status &&
+        this.canTransition(
+          previousStatus,
+          update.status,
+          shipment.shipmentKind,
+        )
           ? update.status
           : previousStatus;
       shipment.providerTrackingId =
@@ -871,29 +889,37 @@ export class ShippingService {
       return { shipment: saved, event };
     });
     if (result.event) await this.events.publish(result.shipment, result.event);
-    if (
-      result.shipment.shipmentKind === "RETURN" &&
-      result.shipment.returnRequestId &&
-      result.shipment.status === ShipmentStatus.RETURNED
-    ) {
-      await this.orderClient.markReturnReceived(
-        result.shipment.returnRequestId,
-      );
+    if (result.shipment.shipmentKind === "RETURN" && result.shipment.returnRequestId) {
+      // Đồng bộ từng mốc reverse shipment để Order Service không bị kẹt ở
+      // AWAITING_SHIPMENT khi callback sau lúc tạo vận đơn bị gián đoạn.
+      if (result.shipment.status === ShipmentStatus.RETURNING) {
+        await this.orderClient.markReturnInTransit(
+          result.shipment.returnRequestId,
+        );
+      }
+      if (result.shipment.status === ShipmentStatus.RETURNED) {
+        await this.orderClient.markReturnReceived(
+          result.shipment.returnRequestId,
+        );
+      }
     }
     return result.shipment;
   }
 
-  // State machine chỉ cho phép đi tới trạng thái kế tiếp, không cho webhook cũ làm shipment quay lùi.
+  // State machine giữ nguyên tính đơn điệu cho từng chiều vận chuyển; reverse
+  // shipment dùng RETURN_STATUS_RANK để RETURNING/RETURNED được xử lý độc lập
+  // với các trạng thái kết thúc của forward shipment.
   private canTransition(
     current: ShipmentStatus,
     next: ShipmentStatus,
+    shipmentKind: "FORWARD" | "RETURN" = "FORWARD",
   ): boolean {
     if (current === next) return true;
     if ([ShipmentStatus.CANCELLED, ShipmentStatus.RETURNED].includes(current))
       return false;
-    if (current === ShipmentStatus.DELIVERED)
+    if (shipmentKind === "FORWARD" && current === ShipmentStatus.DELIVERED)
       return [ShipmentStatus.RETURNING, ShipmentStatus.RETURNED].includes(next);
-    if (current === ShipmentStatus.RETURNING)
+    if (shipmentKind === "FORWARD" && current === ShipmentStatus.RETURNING)
       return next === ShipmentStatus.RETURNED;
     if (next === ShipmentStatus.CANCELLED) {
       return [
@@ -903,8 +929,10 @@ export class ShippingService {
     }
     if (current === ShipmentStatus.FAILED) return false;
     if (next === ShipmentStatus.FAILED) return ACTIVE_STATUSES.has(current);
-    const currentRank = FORWARD_STATUS_RANK[current];
-    const nextRank = FORWARD_STATUS_RANK[next];
+    const statusRank =
+      shipmentKind === "RETURN" ? RETURN_STATUS_RANK : FORWARD_STATUS_RANK;
+    const currentRank = statusRank[current];
+    const nextRank = statusRank[next];
     return (
       currentRank !== undefined &&
       nextRank !== undefined &&
