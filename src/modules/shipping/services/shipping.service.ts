@@ -557,18 +557,22 @@ export class ShippingService {
     return this.toResponse(await this.syncShipment(shipmentId, "POLL"));
   }
 
-  // Hủy ở provider trước, sau đó mới commit canonical state để local không nói hủy khi GHN từ chối.
+  // Hủy ở provider trước, sau đó commit canonical state của Shipping trong transaction local.
+  // Chỉ sau khi transaction resolve mới gọi callback đồng bộ Order để Order không xử lý trước khi Shipping ghi nhận hủy.
+  // Nếu callback lỗi, shipment đã CANCELLED nên lần retry sẽ bỏ qua GHN và thử đồng bộ Order lại một cách idempotent.
   async cancelInternal(
     shipmentId: string,
     reason = "Hủy vận đơn trước khi lấy hàng.",
-    afterProviderCancellation?: () => Promise<void>,
+    afterLocalCancellationCommit?: () => Promise<void>,
   ): Promise<ShipmentResponse> {
     const shipment = await this.repository
       .getEntityRepository()
       .findOne({ where: { id: shipmentId } });
     if (!shipment) throw new NotFoundException("Không tìm thấy vận đơn.");
-    if (shipment.status === ShipmentStatus.CANCELLED)
+    if (shipment.status === ShipmentStatus.CANCELLED) {
+      await this.syncOrderAfterCancellation(afterLocalCancellationCommit);
       return this.toResponse(shipment);
+    }
     if (
       ![ShipmentStatus.READY_TO_SHIP, ShipmentStatus.PICKUP_ASSIGNED].includes(
         shipment.status,
@@ -579,7 +583,6 @@ export class ShippingService {
       );
     }
     await this.provider.cancelShipment(shipment.providerTrackingId);
-    if (afterProviderCancellation) await afterProviderCancellation();
     const transition = await this.dataSource.transaction(async (manager) => {
       const locked = await this.lockShipment(manager, shipmentId);
       if (locked.status === ShipmentStatus.CANCELLED)
@@ -617,9 +620,27 @@ export class ShippingService {
       saved.events = [...locked.events, event];
       return { shipment: saved, event };
     });
+    // Promise transaction chỉ hoàn tất sau khi TypeORM commit thành công; lúc này Order mới được phép hoàn tồn kho.
+    await this.syncOrderAfterCancellation(afterLocalCancellationCommit);
     if (transition.event)
       await this.events.publish(transition.shipment, transition.event);
     return this.toResponse(transition.shipment);
+  }
+
+  // Đồng bộ Order sau commit local; giữ lỗi để caller retry vì nếu nuốt lỗi sẽ tạo shipment hủy nhưng tồn kho chưa hoàn.
+  private async syncOrderAfterCancellation(
+    callback?: () => Promise<void>,
+  ): Promise<void> {
+    if (!callback) return;
+    try {
+      await callback();
+    } catch (error) {
+      this.logger.error(
+        "Shipping đã commit hủy vận đơn nhưng chưa đồng bộ được Order Service.",
+        error instanceof Error ? error.stack : String(error),
+      );
+      throw error;
+    }
   }
 
   // In nhãn Test qua provider, không expose token hay URL GHN cho browser.
