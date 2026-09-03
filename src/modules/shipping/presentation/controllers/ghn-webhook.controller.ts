@@ -1,7 +1,7 @@
 // Nhận callback JSON từ GHN và chuyển cho state machine idempotent của Shipping Service.
 
 import { Body, Controller, HttpCode, Post } from "@nestjs/common";
-import { ShippingService } from "../services/shipping.service";
+import { ShippingService } from "../../application/services/shipping.service";
 
 @Controller("internal/webhooks/ghn")
 export class GhnWebhookController {

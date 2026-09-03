@@ -14,10 +14,10 @@ import {
 import { ConfigService } from "@nestjs/config";
 import { Interval } from "@nestjs/schedule";
 import { DataSource, EntityManager, QueryFailedError } from "typeorm";
-import { Shipment } from "../../../database/entities/shipment.entity";
-import { ShipmentEvent } from "../../../database/entities/shipment-event.entity";
-import { ShipmentStatus } from "../../../database/enums/shipment-status.enum";
-import { ShipmentRepository } from "../repositories/shipment.repository";
+import { Shipment } from "../../../../database/entities/shipment.entity";
+import { ShipmentEvent } from "../../../../database/entities/shipment-event.entity";
+import { ShipmentStatus } from "../../../../database/enums/shipment-status.enum";
+import { ShipmentRepository } from "../../infrastructure/repositories/shipment.repository";
 import { OrderClient } from "../clients/order.client";
 import { SellerShopClient } from "../clients/seller-shop.client";
 import { GhnMasterDataClient } from "../clients/ghn-master-data.client";
@@ -38,8 +38,8 @@ import type {
   CustomerTrackingResponse,
   ShipmentResponse,
 } from "../types/shipping-response.types";
-import { ShipmentEventsPublisher } from "../../../kafka/shipment-events.publisher";
-import type { CalculateShippingQuoteDto } from "../dto/calculate-shipping-quote.dto";
+import { ShipmentEventsPublisher } from "../../../../kafka/shipment-events.publisher";
+import type { CalculateShippingQuoteDto } from "../../presentation/dto/calculate-shipping-quote.dto";
 
 const ACTIVE_STATUSES = new Set<ShipmentStatus>([
   ShipmentStatus.READY_TO_SHIP,

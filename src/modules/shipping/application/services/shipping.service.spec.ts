@@ -5,14 +5,14 @@
 import { type DeepMocked } from "@golevelup/ts-jest";
 import { ConfigService } from "@nestjs/config";
 import { DataSource, Repository } from "typeorm";
-import { Shipment } from "../../../database/entities/shipment.entity";
-import { ShipmentEvent } from "../../../database/entities/shipment-event.entity";
-import { ShipmentStatus } from "../../../database/enums/shipment-status.enum";
-import { ShipmentEventsPublisher } from "../../../kafka/shipment-events.publisher";
+import { Shipment } from "../../../../database/entities/shipment.entity";
+import { ShipmentEvent } from "../../../../database/entities/shipment-event.entity";
+import { ShipmentStatus } from "../../../../database/enums/shipment-status.enum";
+import { ShipmentEventsPublisher } from "../../../../kafka/shipment-events.publisher";
 import { GhnMasterDataClient } from "../clients/ghn-master-data.client";
 import { OrderClient } from "../clients/order.client";
 import { SellerShopClient } from "../clients/seller-shop.client";
-import { ShipmentRepository } from "../repositories/shipment.repository";
+import { ShipmentRepository } from "../../infrastructure/repositories/shipment.repository";
 import { ShippingService } from "./shipping.service";
 import type { ShippingProvider } from "../types/shipping.types";
 

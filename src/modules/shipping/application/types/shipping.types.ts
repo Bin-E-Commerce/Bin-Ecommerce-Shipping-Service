@@ -1,6 +1,6 @@
 // Contract nội bộ của luồng giao nhận, dùng chung cho Order, Seller và provider GHN Test.
 
-import { ShipmentStatus } from "../../../database/enums/shipment-status.enum";
+import { ShipmentStatus } from "../../../../database/enums/shipment-status.enum";
 
 export const SHIPPING_PROVIDER = "SHIPPING_PROVIDER";
 export const GHN_PROVIDER = "GHN_TEST" as const;

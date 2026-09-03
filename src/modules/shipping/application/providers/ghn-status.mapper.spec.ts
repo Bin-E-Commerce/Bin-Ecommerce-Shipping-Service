@@ -2,7 +2,7 @@
 
 /// <reference types="jest" />
 
-import { ShipmentStatus } from "../../../database/enums/shipment-status.enum";
+import { ShipmentStatus } from "../../../../database/enums/shipment-status.enum";
 import { normalizeGhnStatus } from "./ghn-status.mapper";
 
 describe("normalizeGhnStatus", () => {
