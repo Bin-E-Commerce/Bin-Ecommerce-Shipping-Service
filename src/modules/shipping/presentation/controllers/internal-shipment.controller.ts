@@ -3,7 +3,7 @@
 import { Body, Controller, Get, Headers, Param, ParseUUIDPipe, Post, UnauthorizedException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { CalculateShippingQuoteDto } from "../dto/calculate-shipping-quote.dto";
-import { ShippingService } from "../services/shipping.service";
+import { ShippingService } from "../../application/services/shipping.service";
 
 @Controller({ path: "internal/shipments", version: "1" })
 export class InternalShipmentController {

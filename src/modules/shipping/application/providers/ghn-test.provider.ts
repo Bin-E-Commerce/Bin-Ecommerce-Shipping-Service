@@ -7,7 +7,7 @@ import {
   ServiceUnavailableException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { ShipmentStatus } from "../../../database/enums/shipment-status.enum";
+import { ShipmentStatus } from "../../../../database/enums/shipment-status.enum";
 import type {
   CreateShipmentInput,
   CreatedShipment,

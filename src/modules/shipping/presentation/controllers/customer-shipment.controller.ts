@@ -2,7 +2,7 @@
 
 import { Controller, Get, Headers, Param, ParseUUIDPipe, Post } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { ShippingService } from '../services/shipping.service';
+import { ShippingService } from '../../application/services/shipping.service';
 
 @ApiTags('customer-shipments')
 @ApiBearerAuth()

@@ -3,8 +3,8 @@
 import { Body, Controller, Get, Headers, Param, ParseUUIDPipe, Post, Res } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import type { Response } from "express";
-import type { CurrentSellerContext } from "../types/shipping.types";
-import { ShippingService } from "../services/shipping.service";
+import type { CurrentSellerContext } from "../../application/types/shipping.types";
+import { ShippingService } from "../../application/services/shipping.service";
 import { CancelShipmentDto } from "../dto/cancel-shipment.dto";
 
 @ApiTags("seller-shipments")

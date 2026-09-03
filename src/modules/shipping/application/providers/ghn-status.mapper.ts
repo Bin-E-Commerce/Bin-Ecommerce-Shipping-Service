@@ -1,6 +1,6 @@
 // Map trạng thái text của GHN sang canonical status của Shipping Service.
 
-import { ShipmentStatus } from "../../../database/enums/shipment-status.enum";
+import { ShipmentStatus } from "../../../../database/enums/shipment-status.enum";
 
 export interface NormalizedGhnStatus {
   canonicalStatus: ShipmentStatus | null;

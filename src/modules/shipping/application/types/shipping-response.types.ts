@@ -1,6 +1,6 @@
 // Public response của shipment, không trả credential hoặc dữ liệu cross-shop không cần thiết.
 
-import { ShipmentStatus } from "../../../database/enums/shipment-status.enum";
+import { ShipmentStatus } from "../../../../database/enums/shipment-status.enum";
 
 export interface ShipmentResponse {
   id: string;

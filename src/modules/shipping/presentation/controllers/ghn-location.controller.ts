@@ -1,7 +1,7 @@
 // API master data GHN do Shipping Service sở hữu và che giấu credential với frontend.
 
 import { Controller, Get, ParseIntPipe, Query } from "@nestjs/common";
-import { ShippingService } from "../services/shipping.service";
+import { ShippingService } from "../../application/services/shipping.service";
 
 @Controller("shipping/locations")
 export class GhnLocationController {
