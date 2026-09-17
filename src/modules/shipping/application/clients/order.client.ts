@@ -15,7 +15,7 @@ export class OrderClient {
   // Đọc endpoint Order Service và token nội bộ từ environment.
   constructor(config: ConfigService) {
     this.targetBase = config.get<string>('ORDER_SERVICE_URL', 'http://localhost:3011');
-    this.internalToken = config.get<string>('INTERNAL_SERVICE_TOKEN', 'dev-media-auth-internal-secret');
+    this.internalToken = config.get<string>('INTERNAL_SERVICE_TOKEN', '');
   }
 
   // Lấy snapshot đã được Order Service giới hạn theo user/shop để tạo shipment Seller.

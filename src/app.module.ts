@@ -22,7 +22,7 @@ import { ShippingModule } from './modules/shipping/shipping.module';
         host: config.get<string>('POSTGRES_HOST', 'localhost'),
         port: config.get<number>('POSTGRES_PORT', 5432),
         username: config.get<string>('POSTGRES_USER', 'bin_ecommerce'),
-        password: config.get<string>('POSTGRES_PASSWORD', 'changeme_postgres'),
+        password: config.get<string>('POSTGRES_PASSWORD'),
         database: config.get<string>('POSTGRES_DB', 'bin_shipping'),
         entities: [__dirname + '/**/*.entity{.ts,.js}'],
         migrations: [__dirname + '/database/migrations/*{.ts,.js}'],

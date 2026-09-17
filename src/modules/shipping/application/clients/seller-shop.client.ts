@@ -29,7 +29,7 @@ export class SellerShopClient {
   // Đọc URL và shared token một lần khi service khởi tạo.
   constructor(config: ConfigService) {
     this.targetBase = config.get<string>("SELLER_SERVICE_URL", "http://localhost:3007");
-    this.internalToken = config.get<string>("INTERNAL_SERVICE_TOKEN", "dev-media-auth-internal-secret");
+    this.internalToken = config.get<string>("INTERNAL_SERVICE_TOKEN", "");
   }
 
   // Resolve shop từ user context, không nhận shopId do browser truyền lên.
