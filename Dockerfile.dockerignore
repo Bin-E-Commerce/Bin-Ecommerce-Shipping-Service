@@ -1,0 +1,28 @@
+# Chỉ gửi các file cần thiết của Shipping Service vào Docker build context.
+*
+!tsconfig.base.json
+!packages/
+!packages/common/
+!packages/common/**
+!services/
+!services/shipping-service/
+!services/shipping-service/package.json
+!services/shipping-service/package-lock.json
+!services/shipping-service/tsconfig.json
+!services/shipping-service/tsconfig.build.json
+!services/shipping-service/nest-cli.json
+!services/shipping-service/src/
+!services/shipping-service/src/**
+
+# Không đưa artifact local, test output, Git metadata hoặc secret vào context.
+**/node_modules
+**/dist
+**/coverage
+**/*.spec.ts
+**/*.e2e-spec.ts
+**/.env
+**/.env.*
+**/.git
+**/.gitignore
+**/.vscode
+**/*.log
