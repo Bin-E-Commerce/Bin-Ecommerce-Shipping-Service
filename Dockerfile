@@ -19,7 +19,10 @@ COPY services/shipping-service/tsconfig.json \
 
 # Shipping có lockfile riêng; npm ci giúp build tái lập đúng phiên bản dependency.
 WORKDIR /app/services/shipping-service
-RUN npm ci --include=dev --ignore-scripts
+# Builder luôn giữ devDependency vì TypeScript là toolchain compile, không phải runtime dependency.
+ENV NODE_ENV=development
+RUN npm ci --include=dev --bin-links=true --ignore-scripts \
+  && test -x node_modules/.bin/tsc
 
 # Chỉ copy source Shipping sau khi dependency đã được cache.
 COPY services/shipping-service/src ./src
