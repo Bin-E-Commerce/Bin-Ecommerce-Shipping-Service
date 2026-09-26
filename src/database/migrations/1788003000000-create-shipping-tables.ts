@@ -1,15 +1,17 @@
 // Tạo schema shipment canonical cho GHN Test trên database mới.
 
-import { MigrationInterface, QueryRunner } from "typeorm";
+import { MigrationInterface, QueryRunner } from 'typeorm';
 
 export class CreateShippingTables1788003000000 implements MigrationInterface {
-  name = "CreateShippingTables1788003000000";
+    name = 'CreateShippingTables1788003000000';
 
-  // Tạo enum, shipment snapshot và append-only provider events với unique guard idempotency.
-  async up(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(`CREATE EXTENSION IF NOT EXISTS "pgcrypto"`);
-    await queryRunner.query(`CREATE TYPE "shipment_status_enum" AS ENUM ('READY_TO_SHIP','PICKUP_ASSIGNED','PICKED_UP','IN_TRANSIT','DELIVERED','FAILED','CANCELLED','RETURNING','RETURNED')`);
-    await queryRunner.query(`
+    // Tạo enum, shipment snapshot và append-only provider events với unique guard idempotency.
+    async up(queryRunner: QueryRunner): Promise<void> {
+        await queryRunner.query(`CREATE EXTENSION IF NOT EXISTS "pgcrypto"`);
+        await queryRunner.query(
+            `CREATE TYPE "shipment_status_enum" AS ENUM ('READY_TO_SHIP','PICKUP_ASSIGNED','PICKED_UP','IN_TRANSIT','DELIVERED','FAILED','CANCELLED','RETURNING','RETURNED')`,
+        );
+        await queryRunner.query(`
       CREATE TABLE "shipments" (
         "id" uuid NOT NULL DEFAULT gen_random_uuid(),
         "order_id" uuid NOT NULL,
@@ -41,9 +43,13 @@ export class CreateShippingTables1788003000000 implements MigrationInterface {
         CONSTRAINT "uq_shipments_order_shop" UNIQUE ("order_id", "shop_id")
       )
     `);
-    await queryRunner.query(`CREATE INDEX "idx_shipments_shop_created_at" ON "shipments" ("shop_id", "created_at")`);
-    await queryRunner.query(`CREATE INDEX "idx_shipments_order_id" ON "shipments" ("order_id")`);
-    await queryRunner.query(`
+        await queryRunner.query(
+            `CREATE INDEX "idx_shipments_shop_created_at" ON "shipments" ("shop_id", "created_at")`,
+        );
+        await queryRunner.query(
+            `CREATE INDEX "idx_shipments_order_id" ON "shipments" ("order_id")`,
+        );
+        await queryRunner.query(`
       CREATE TABLE "shipment_events" (
         "id" uuid NOT NULL DEFAULT gen_random_uuid(),
         "shipment_id" uuid NOT NULL,
@@ -63,13 +69,15 @@ export class CreateShippingTables1788003000000 implements MigrationInterface {
         CONSTRAINT "fk_shipment_events_shipment" FOREIGN KEY ("shipment_id") REFERENCES "shipments"("id") ON DELETE CASCADE
       )
     `);
-    await queryRunner.query(`CREATE INDEX "idx_shipment_events_shipment_occurred" ON "shipment_events" ("shipment_id", "occurred_at")`);
-  }
+        await queryRunner.query(
+            `CREATE INDEX "idx_shipment_events_shipment_occurred" ON "shipment_events" ("shipment_id", "occurred_at")`,
+        );
+    }
 
-  // Xóa schema shipment trong môi trường disposable.
-  async down(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(`DROP TABLE "shipment_events"`);
-    await queryRunner.query(`DROP TABLE "shipments"`);
-    await queryRunner.query(`DROP TYPE "shipment_status_enum"`);
-  }
+    // Xóa schema shipment trong môi trường disposable.
+    async down(queryRunner: QueryRunner): Promise<void> {
+        await queryRunner.query(`DROP TABLE "shipment_events"`);
+        await queryRunner.query(`DROP TABLE "shipments"`);
+        await queryRunner.query(`DROP TYPE "shipment_status_enum"`);
+    }
 }
