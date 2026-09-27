@@ -299,6 +299,7 @@ export class ShippingService {
                 });
                 await eventRepository.save(event);
                 saved.events = [event];
+                await this.events.enqueue(saved, event, manager);
                 return { shipment: saved, event };
             },
         );
@@ -355,11 +356,13 @@ export class ShippingService {
             codAmount: 0,
             shipmentKind: 'RETURN',
         });
+        const isLocalDemoReturn = this.isLocalDemoMode();
         // Không cho phép phí thực tế rỗng ghi đè phí quote đã chốt; GHN phải trả total_fee cho vận đơn hoàn.
         // Nếu provider thiếu phí, hủy vận đơn vừa tạo để seller có thể thử lại mà không sinh dữ liệu lệch.
         if (
-            !providerShipment.shippingFee ||
-            Number(providerShipment.shippingFee) <= 0
+            !isLocalDemoReturn &&
+            (!providerShipment.shippingFee ||
+                Number(providerShipment.shippingFee) <= 0)
         ) {
             await this.compensateProviderShipment(
                 providerShipment.trackingId,
@@ -369,18 +372,20 @@ export class ShippingService {
                 'GHN không trả về chi phí vận chuyển hoàn hàng.',
             );
         }
-        // GHN trả total_fee theo đúng tuyến customer -> shop; hủy provider nếu Order Service không ghi nhận được chi phí.
-        try {
-            await this.orderClient.updateReturnShippingCost(
-                returnRequestId,
-                providerShipment.shippingFee ?? '0.00',
-            );
-        } catch (error) {
-            await this.compensateProviderShipment(
-                providerShipment.trackingId,
-                'Order Service không ghi nhận được phí vận chuyển hoàn hàng.',
-            );
-            throw error;
+        // GHN trả total_fee theo đúng tuyến customer -> shop; demo giữ nguyên phí quote đã chốt trong Order.
+        if (!isLocalDemoReturn) {
+            try {
+                await this.orderClient.updateReturnShippingCost(
+                    returnRequestId,
+                    providerShipment.shippingFee ?? '0.00',
+                );
+            } catch (error) {
+                await this.compensateProviderShipment(
+                    providerShipment.trackingId,
+                    'Order Service không ghi nhận được phí vận chuyển hoàn hàng.',
+                );
+                throw error;
+            }
         }
         let transition: { shipment: Shipment; event: ShipmentEvent };
         try {
@@ -432,6 +437,7 @@ export class ShippingService {
                 });
                 await eventRepository.save(event);
                 saved.events = [event];
+                await this.events.enqueue(saved, event, manager);
                 return { shipment: saved, event };
             });
         } catch (error) {
@@ -649,6 +655,7 @@ export class ShippingService {
             });
             await manager.getRepository(ShipmentEvent).save(event);
             saved.events = [...locked.events, event];
+            await this.events.enqueue(saved, event, manager);
             return { shipment: saved, event };
         });
     }
@@ -750,6 +757,7 @@ export class ShippingService {
                 });
                 await manager.getRepository(ShipmentEvent).save(event);
                 saved.events = [...locked.events, event];
+                await this.events.enqueue(saved, event, manager);
                 return { shipment: saved, event };
             },
         );
@@ -961,6 +969,7 @@ export class ShippingService {
                 throw error;
             }
             saved.events = [...shipment.events, event];
+            await this.events.enqueue(saved, event, manager);
             return { shipment: saved, event };
         });
         if (result.event)
@@ -1112,6 +1121,27 @@ export class ShippingService {
                 'Chức năng bỏ qua bước chỉ có trong môi trường GHN Test.',
             );
         }
+    }
+
+    // Xác định demo mode để không ghi đè phí hoàn đã quote bằng phí giả lập.
+    private isLocalDemoMode(): boolean {
+        const nodeEnvironment = this.config
+            .get<string>('NODE_ENV', 'development')
+            ?.trim()
+            .toLowerCase();
+        const baseUrl = this.config
+            .get<string>('GHN_BASE_URL', 'https://dev-online-gateway.ghn.vn')
+            ?.replace(/\/$/, '');
+        const enabled =
+            this.config
+                .get<string>('SHIPPING_DEMO_MODE', 'true')
+                ?.trim()
+                .toLowerCase() === 'true';
+        return (
+            enabled &&
+            nodeEnvironment !== 'production' &&
+            baseUrl === 'https://dev-online-gateway.ghn.vn'
+        );
     }
 
     // Không để polling GHN ghi đè trạng thái demo trước khi Seller kịp trình bày xong luồng.

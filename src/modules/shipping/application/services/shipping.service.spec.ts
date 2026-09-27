@@ -85,6 +85,7 @@ describe('ShippingService consistency', () => {
         } as unknown as DeepMocked<SellerShopClient>;
         mockGhnMasterDataClient = {} as DeepMocked<GhnMasterDataClient>;
         mockEvents = {
+            enqueue: jest.fn(),
             publish: jest.fn(),
         } as unknown as DeepMocked<ShipmentEventsPublisher>;
         mockShipmentEntityRepository = {
@@ -96,6 +97,7 @@ describe('ShippingService consistency', () => {
         mockShipmentEntityRepository.findOne.mockResolvedValue(shipment);
         mockProvider.cancelShipment.mockResolvedValue();
         mockEvents.publish.mockResolvedValue();
+        mockEvents.enqueue.mockResolvedValue();
         target = new ShippingService(
             mockConfig,
             mockDataSource,

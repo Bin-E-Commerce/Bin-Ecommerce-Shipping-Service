@@ -46,6 +46,7 @@ export class GhnTestProvider implements ShippingProvider {
     private readonly token: string;
     private readonly shopIdInput: string;
     private readonly shopId: number | null;
+    private readonly demoMode: boolean;
     private readonly timeoutMs: number;
     private readonly serviceTypeId: number;
     private readonly defaultPoint: RoutePoint;
@@ -73,6 +74,11 @@ export class GhnTestProvider implements ShippingProvider {
             Number.isInteger(configuredShopId) && configuredShopId > 0
                 ? configuredShopId
                 : null;
+        this.demoMode =
+            config
+                .get<string>('SHIPPING_DEMO_MODE', 'false')
+                ?.trim()
+                .toLowerCase() === 'true';
         this.timeoutMs = Math.max(
             1_000,
             config.get<number>('GHN_REQUEST_TIMEOUT_MS', 10_000),
@@ -187,6 +193,11 @@ export class GhnTestProvider implements ShippingProvider {
 
     // Tạo đơn gửi cân nặng gram, mã client ổn định và tiền COD chỉ là tiền hàng.
     async createShipment(input: CreateShipmentInput): Promise<CreatedShipment> {
+        // GHN Test không hỗ trợ ổn định việc tạo reverse shipment từ địa chỉ khách ngoài kho của ShopId.
+        // Local demo vẫn phải tạo được vận đơn hoàn để trình diễn state machine và event Kafka.
+        if (this.demoMode && input.shipmentKind === 'RETURN')
+            return this.createDemoShipment(input);
+
         this.ensureConfigured();
         const [from, to] = await Promise.all([
             this.resolveAddress(input.pickupAddress),
@@ -211,11 +222,18 @@ export class GhnTestProvider implements ShippingProvider {
                 from_ward_name: from.wardName,
                 from_district_name: from.districtName,
                 from_province_name: from.provinceName,
+                return_name: input.pickupAddress.contactName,
                 return_phone: input.pickupAddress.phone,
                 return_address: input.pickupAddress.addressLine,
+                return_ward_name: from.wardName,
+                return_district_name: from.districtName,
+                return_province_name: from.provinceName,
                 to_name: input.shippingAddress.contactName,
                 to_phone: input.shippingAddress.phone,
                 to_address: input.shippingAddress.addressLine,
+                to_ward_name: to.wardName,
+                to_district_name: to.districtName,
+                to_province_name: to.provinceName,
                 to_ward_code: to.wardCode,
                 to_district_id: to.districtId,
                 client_order_code: providerOrderReference,
@@ -305,6 +323,9 @@ export class GhnTestProvider implements ShippingProvider {
 
     // GHN nhận danh sách mã vận đơn ở endpoint switch-status/cancel.
     async cancelShipment(trackingId: string): Promise<void> {
+        // Vận đơn demo không tồn tại ở GHN nên không được gọi API hủy bên ngoài.
+        if (trackingId.startsWith('DEMO-')) return;
+
         this.ensureConfigured();
         await this.requestJson<UnknownRecord>(
             '/shiip/public-api/v2/switch-status/cancel',
@@ -413,6 +434,27 @@ export class GhnTestProvider implements ShippingProvider {
             throw new ServiceUnavailableException(
                 'GHN_SHOP_ID phải là mã số nguyên dương, không chứa khoảng trắng hoặc dấu phân cách.',
             );
+    }
+
+    // Tạo vận đơn hoàn nội bộ cho môi trường demo khi GHN không thể nhận địa chỉ khách làm kho xuất phát.
+    private createDemoShipment(input: CreateShipmentInput): CreatedShipment {
+        const providerOrderReference = this.createPartnerReference(
+            input.orderNumber,
+            input.shopId,
+            'RETURN',
+        );
+        const trackingId = `DEMO-${providerOrderReference}`.slice(0, 128);
+
+        return {
+            providerOrderReference,
+            trackingId,
+            providerStatusCode: 0,
+            providerStatusText: 'DEMO · Đã tạo vận đơn hoàn',
+            status: ShipmentStatus.READY_TO_SHIP,
+            currentLocation: this.defaultPoint,
+            routePoints: this.demoRoutePoints,
+            estimatedDeliveryAt: null,
+        };
     }
 
     // Kiểm tra mã GHN đã lưu trước khi gọi fee hoặc tạo vận đơn.
