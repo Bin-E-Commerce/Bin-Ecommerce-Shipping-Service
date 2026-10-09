@@ -3,6 +3,7 @@
 /// <reference types="jest" />
 
 import { type DeepMocked } from '@golevelup/ts-jest';
+import { ForbiddenException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DataSource, Repository } from 'typeorm';
 import { Shipment } from '@/database/entities/shipment.entity';
@@ -112,6 +113,115 @@ describe('ShippingService consistency', () => {
 
     afterEach(() => {
         jest.clearAllMocks();
+    });
+
+    // Production chỉ được mô phỏng vận đơn GHN Test khi cờ riêng được bật tường minh.
+    it('should allow demo advancement in production when explicitly enabled for GHN Test', async () => {
+        // Arrange
+        const transactionFailure = new Error('transaction reached');
+        mockConfig.get.mockImplementation(((key: string, fallback?: string) => {
+            const values: Record<string, string> = {
+                NODE_ENV: 'production',
+                GHN_BASE_URL: 'https://dev-online-gateway.ghn.vn',
+                SHIPPING_DEMO_ADVANCE_ENABLED: 'true',
+            };
+            return values[key] ?? fallback;
+        }) as never);
+        mockSellerShopClient.getOwnedShopId.mockResolvedValue('shop-1');
+        mockShipmentEntityRepository.findOne.mockResolvedValue(shipment);
+        mockDataSource.transaction.mockRejectedValue(transactionFailure);
+        const currentUser = {
+            userId: 'seller-1',
+            email: 'seller@example.com',
+            permissions: ['seller.shipping.read', 'seller.shipping.manage'],
+        };
+
+        // Act: transaction sentinel chứng minh request đi qua guard nhưng không chạy transaction thật.
+        const operation = target.advanceDemoForSeller('order-1', currentUser);
+
+        // Assert
+        await expect(operation).rejects.toBe(transactionFailure);
+        expect(mockDataSource.transaction).toHaveBeenCalledTimes(1);
+    });
+
+    // Cờ mặc định không mở demo trong production để tránh đổi trạng thái đơn ngoài kế hoạch trình diễn.
+    it('should reject demo advancement in production when the explicit flag is missing', async () => {
+        // Arrange
+        mockConfig.get.mockImplementation(((key: string, fallback?: string) => {
+            const values: Record<string, string> = {
+                NODE_ENV: 'production',
+                GHN_BASE_URL: 'https://dev-online-gateway.ghn.vn',
+            };
+            return values[key] ?? fallback;
+        }) as never);
+        mockSellerShopClient.getOwnedShopId.mockResolvedValue('shop-1');
+        mockShipmentEntityRepository.findOne.mockResolvedValue(shipment);
+        const currentUser = {
+            userId: 'seller-1',
+            email: 'seller@example.com',
+            permissions: ['seller.shipping.read', 'seller.shipping.manage'],
+        };
+
+        // Act & Assert
+        await expect(
+            target.advanceDemoForSeller('order-1', currentUser),
+        ).rejects.toThrow(ForbiddenException);
+        expect(mockDataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    // Feature flag không thể biến carrier live thành demo; URL phải đúng endpoint sandbox của GHN.
+    it('should reject demo advancement when production points to a non-test carrier URL', async () => {
+        // Arrange
+        mockConfig.get.mockImplementation(((key: string, fallback?: string) => {
+            const values: Record<string, string> = {
+                NODE_ENV: 'production',
+                GHN_BASE_URL: 'https://api.ghn.vn',
+                SHIPPING_DEMO_ADVANCE_ENABLED: 'true',
+            };
+            return values[key] ?? fallback;
+        }) as never);
+        mockSellerShopClient.getOwnedShopId.mockResolvedValue('shop-1');
+        mockShipmentEntityRepository.findOne.mockResolvedValue(shipment);
+        const currentUser = {
+            userId: 'seller-1',
+            email: 'seller@example.com',
+            permissions: ['seller.shipping.read', 'seller.shipping.manage'],
+        };
+
+        // Act & Assert
+        await expect(
+            target.advanceDemoForSeller('order-1', currentUser),
+        ).rejects.toThrow(ForbiddenException);
+        expect(mockDataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    // Cờ production không bỏ qua kiểm tra provider đã gắn với chính shipment trong database.
+    it('should reject demo advancement for a shipment owned by another provider', async () => {
+        // Arrange
+        mockConfig.get.mockImplementation(((key: string, fallback?: string) => {
+            const values: Record<string, string> = {
+                NODE_ENV: 'production',
+                GHN_BASE_URL: 'https://dev-online-gateway.ghn.vn',
+                SHIPPING_DEMO_ADVANCE_ENABLED: 'true',
+            };
+            return values[key] ?? fallback;
+        }) as never);
+        mockSellerShopClient.getOwnedShopId.mockResolvedValue('shop-1');
+        mockShipmentEntityRepository.findOne.mockResolvedValue({
+            ...shipment,
+            provider: 'OTHER_PROVIDER',
+        } as Shipment);
+        const currentUser = {
+            userId: 'seller-1',
+            email: 'seller@example.com',
+            permissions: ['seller.shipping.read', 'seller.shipping.manage'],
+        };
+
+        // Act & Assert
+        await expect(
+            target.advanceDemoForSeller('order-1', currentUser),
+        ).rejects.toThrow(ForbiddenException);
+        expect(mockDataSource.transaction).not.toHaveBeenCalled();
     });
 
     // Transaction promise resolve biểu thị local commit; callback Order phải chạy sau mốc này.

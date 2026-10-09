@@ -534,7 +534,9 @@ export class ShippingService {
         );
     }
 
-    // Chuyển một chặng demo theo state machine và lưu event để Seller có thể trình diễn sau khi refresh.
+    // Xác minh quyền sở hữu shipment trước, rồi mới kiểm tra feature flag để phản hồi không làm lộ đơn ngoài shop.
+    // Khi được phép, state machine ghi trạng thái và event trong cùng transaction; event chỉ publish sau commit.
+    // Production chỉ qua được guard khi bật cờ riêng và shipment/provider vẫn thuộc GHN Test.
     async advanceDemoForSeller(
         orderId: string,
         currentUser: CurrentSellerContext,
@@ -543,7 +545,7 @@ export class ShippingService {
             orderId,
             currentUser,
         );
-        this.ensureDemoMode();
+        this.ensureDemoMode(shipment);
         const result = await this.advanceDemoShipment(
             shipment.id,
             DEMO_STATUS_SEQUENCE,
@@ -552,7 +554,9 @@ export class ShippingService {
         return this.toResponse(result.shipment);
     }
 
-    // Customer chỉ được điều khiển reverse shipment thuộc order của mình; bước cuối đồng bộ request sang RECEIVED.
+    // Kiểm tra đăng nhập, ownership của return và order trước khi cho phép mô phỏng trạng thái.
+    // Guard demo dùng chung cờ GHN Test với Seller nhưng không bật local-demo fee behavior trên production.
+    // Bước cuối vẫn đồng bộ trạng thái nhận hàng về Order Service như luồng hiện hữu.
     async advanceDemoForCustomerReturn(
         returnRequestId: string,
         ownerId: string,
@@ -586,7 +590,7 @@ export class ShippingService {
             return this.toResponse(shipment);
         }
 
-        this.ensureDemoMode();
+        this.ensureDemoMode(shipment);
         const result = await this.advanceDemoShipment(
             shipment.id,
             DEMO_RETURN_STATUS_SEQUENCE,
@@ -1098,27 +1102,41 @@ export class ShippingService {
             );
     }
 
-    // Chỉ cho phép nút bỏ qua trong môi trường GHN Test để không thể tự chuyển trạng thái đơn thật.
-    private ensureDemoMode(): void {
-        const nodeEnvironment = this.config
-            .get<string>('NODE_ENV', 'development')
+    // Cho phép demo khi local demo đang bật hoặc production được bật cờ riêng.
+    // Cờ riêng không ảnh hưởng đến SHIPPING_DEMO_MODE nên không thay đổi logic tạo vận đơn hoàn.
+    // Dù bật ở production, thao tác vẫn chỉ chạy khi service trỏ đúng GHN Test và shipment thuộc GHN Test.
+    private isDemoAdvancementEnabled(): boolean {
+        const nodeEnvironment = (
+            this.config.get<string>('NODE_ENV') ?? 'development'
+        )
             .trim()
             .toLowerCase();
-        const baseUrl = this.config
-            .get<string>('GHN_BASE_URL', 'https://dev-online-gateway.ghn.vn')
-            .replace(/\/$/, '');
-        const enabled =
-            this.config
-                .get<string>('SHIPPING_DEMO_MODE', 'true')
-                .trim()
-                .toLowerCase() === 'true';
+        const baseUrl = (
+            this.config.get<string>('GHN_BASE_URL') ??
+            'https://dev-online-gateway.ghn.vn'
+        ).replace(/\/$/, '');
+        const explicitFlag = this.config
+            .get<string>('SHIPPING_DEMO_ADVANCE_ENABLED')
+            ?.trim();
+        // Local giữ hành vi cũ; production chỉ bật khi người vận hành cấu hình rõ cờ riêng.
+        const enabled = !explicitFlag
+            ? nodeEnvironment !== 'production' && this.isLocalDemoMode()
+            : explicitFlag.toLowerCase() === 'true';
+
+        // Chặn nhầm carrier live trước khi cho phép bất kỳ thao tác mô phỏng nào.
+        return enabled && baseUrl === 'https://dev-online-gateway.ghn.vn';
+    }
+
+    // Chặn request ở backend, kể cả khi frontend cũ vẫn còn hiển thị nút demo.
+    // So sánh provider đã lưu để không cho phép đẩy trạng thái vận đơn thuộc carrier khác.
+    // Từ chối bằng 403 khi cờ tắt hoặc URL không còn trỏ GHN Test; không đụng database/event trong trường hợp đó.
+    private ensureDemoMode(shipment: Shipment): void {
         if (
-            !enabled ||
-            nodeEnvironment === 'production' ||
-            baseUrl !== 'https://dev-online-gateway.ghn.vn'
+            shipment.provider !== GHN_PROVIDER ||
+            !this.isDemoAdvancementEnabled()
         ) {
             throw new ForbiddenException(
-                'Chức năng bỏ qua bước chỉ có trong môi trường GHN Test.',
+                'Chức năng demo chưa được bật cho vận đơn GHN Test này.',
             );
         }
     }
@@ -1305,7 +1323,8 @@ export class ShippingService {
         return Number.isNaN(result.getTime()) ? null : result;
     }
 
-    // Map entity sang response mà không lộ shop scope hoặc pickup snapshot riêng của shop khác.
+    // Map entity sang response và chỉ công bố khả năng demo khi cờ môi trường cùng provider đều an toàn.
+    // demoMode mô tả shipment đã được mô phỏng; demoAdvancementEnabled mô tả thao tác có được phép hay không.
     private toResponse(shipment: Shipment): ShipmentResponse {
         return {
             id: shipment.id,
@@ -1329,6 +1348,9 @@ export class ShippingService {
             mapMode: 'INTERNAL_PRESENTATION',
             trackingSource: 'GHN_TEST',
             demoMode: this.isDemoShipment(shipment),
+            demoAdvancementEnabled:
+                shipment.provider === GHN_PROVIDER &&
+                this.isDemoAdvancementEnabled(),
             estimatedDeliveryAt:
                 shipment.estimatedDeliveryAt?.toISOString() ?? null,
             history: [...(shipment.events ?? [])]
