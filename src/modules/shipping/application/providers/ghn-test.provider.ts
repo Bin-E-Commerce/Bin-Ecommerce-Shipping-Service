@@ -143,6 +143,8 @@ export class GhnTestProvider implements ShippingProvider {
                 width: Math.round(input.widthCm),
                 height: Math.round(input.heightCm),
                 insurance_value: Math.round(input.value),
+                // GHN fee API nhận cod_value riêng; chỉ order COD mới truyền khoản thu hộ để ước tính cod_fee.
+                cod_value: Math.round(input.codAmount),
                 coupon: null,
                 items: [],
             },
