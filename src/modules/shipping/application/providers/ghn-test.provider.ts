@@ -320,6 +320,10 @@ export class GhnTestProvider implements ShippingProvider {
             estimatedDeliveryAt: this.date(data.leadtime),
             occurredAt: this.date(data.updated_date) ?? new Date(),
             reason: normalized?.reason ?? null,
+            // Dùng phí thực tế nếu GHN trả về trong detail; nếu contract tracking không có trường này, caller giữ snapshot lúc tạo nhãn.
+            shippingFee: this.money(
+                data.total_fee ?? this.asRecord(data.fee).total,
+            ),
         };
     }
 

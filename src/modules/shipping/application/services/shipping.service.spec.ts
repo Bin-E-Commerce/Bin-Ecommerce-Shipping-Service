@@ -58,6 +58,7 @@ describe('ShippingService consistency', () => {
         createdAt: new Date('2026-09-03T10:00:00.000Z'),
         updatedAt: new Date('2026-09-03T10:00:00.000Z'),
         estimatedDeliveryAt: null,
+        shippingFee: null,
     } as Shipment;
 
     beforeEach(() => {
@@ -79,6 +80,7 @@ describe('ShippingService consistency', () => {
             markReturnInTransit: jest.fn(),
             markReturnReceived: jest.fn(),
             updateReturnShippingCost: jest.fn(),
+            rejectReturnForShippingCostLimit: jest.fn(),
         } as unknown as DeepMocked<OrderClient>;
         mockSellerShopClient = {
             getOwnedShopId: jest.fn(),
@@ -322,6 +324,10 @@ describe('ShippingService consistency', () => {
             orderNumber: 'BIN-0001',
             ownerId: 'customer-1',
             shopId: 'shop-1',
+            reason: 'CHANGE_OF_MIND',
+            returnShippingPayer: 'CUSTOMER',
+            returnShippingEstimatedCost: '12000.00',
+            refundItemAmount: '100000.00',
             shippingAddress: {
                 contactName: 'Customer',
                 phone: '0910000000',
@@ -389,6 +395,98 @@ describe('ShippingService consistency', () => {
         );
         expect(mockProvider.cancelShipment).toHaveBeenCalledTimes(1);
         expect(mockDataSource.transaction).toHaveBeenCalledTimes(1);
+    });
+
+    // Nếu phí GHN thực tế vượt giá trị món khách hoàn, nhãn phải được hủy trước khi Order từ chối request.
+    it('cancels an over-limit return label and rejects the return before local persistence', async () => {
+        mockConfig.get.mockReturnValue('development');
+        mockSellerShopClient.getOwnedShopId.mockResolvedValue('shop-1');
+        mockSellerShopClient.getDefaultPickupAddress.mockResolvedValue({
+            id: 'pickup-1',
+            contactName: 'Shop',
+            phone: '0900000000',
+            addressLine: '123 Shop Street',
+            ghnProvinceId: 202,
+            ghnProvinceName: 'Ho Chi Minh',
+            ghnDistrictId: 1442,
+            ghnDistrictName: 'District 1',
+            ghnWardCode: '20101',
+            ghnWardName: 'Ben Nghe',
+        } as never);
+        mockRepository.findByReturnRequest.mockResolvedValue(null);
+        mockOrderClient.getReturnShippingContext.mockResolvedValue({
+            returnId: 'return-1',
+            orderId: 'order-1',
+            orderNumber: 'BIN-0001',
+            ownerId: 'customer-1',
+            shopId: 'shop-1',
+            reason: 'CHANGE_OF_MIND',
+            returnShippingPayer: 'CUSTOMER',
+            returnShippingEstimatedCost: '12000.00',
+            refundItemAmount: '100000.00',
+            shippingAddress: {
+                contactName: 'Customer',
+                phone: '0910000000',
+                addressLine: '456 Customer Street',
+                province: 'Ho Chi Minh',
+                district: 'District 1',
+                ward: 'Ben Nghe',
+                ghnAddress: {
+                    provinceId: 202,
+                    districtId: 1442,
+                    wardCode: '20101',
+                    districtName: 'District 1',
+                    wardName: 'Ben Nghe',
+                },
+            },
+            items: [
+                {
+                    productId: 'product-1',
+                    sku: 'SKU-1',
+                    productName: 'Product 1',
+                    imageUrl: null,
+                    unitPrice: '100000.00',
+                    quantity: 1,
+                    lineTotal: '100000.00',
+                    packageWeightGrams: 500,
+                    packageLengthCm: 20,
+                    packageWidthCm: 15,
+                    packageHeightCm: 10,
+                },
+            ],
+        });
+        mockProvider.createShipment.mockResolvedValue({
+            providerOrderReference: 'BIN-RET-BIN-0001-shop-1',
+            trackingId: 'return-tracking-over-limit',
+            providerStatusCode: null,
+            providerStatusText: 'ready_to_pick',
+            status: ShipmentStatus.READY_TO_SHIP,
+            currentLocation: {
+                latitude: 10.7769,
+                longitude: 106.7009,
+                label: 'GHN',
+            },
+            routePoints: [],
+            estimatedDeliveryAt: null,
+            shippingFee: '120000.00',
+        });
+        mockOrderClient.rejectReturnForShippingCostLimit.mockResolvedValue();
+
+        await expect(
+            target.createReturnForSeller('return-1', {
+                userId: 'seller-1',
+                email: 'seller@example.com',
+                permissions: ['seller.shipping.manage'],
+            }),
+        ).rejects.toThrow('vận đơn đã được hủy');
+
+        expect(mockProvider.cancelShipment).toHaveBeenCalledWith(
+            'return-tracking-over-limit',
+        );
+        expect(
+            mockOrderClient.rejectReturnForShippingCostLimit,
+        ).toHaveBeenCalledWith('return-1', '120000');
+        expect(mockDataSource.transaction).not.toHaveBeenCalled();
     });
 
     // Reverse shipment phải đi qua state machine riêng để RETURNING và RETURNED
@@ -468,7 +566,84 @@ describe('ShippingService consistency', () => {
         expect(mockOrderClient.markReturnReceived).toHaveBeenCalledWith(
             'return-1',
         );
-        expect(mockOrderClient.markReturnInTransit).toHaveBeenCalledTimes(1);
+        expect(mockOrderClient.markReturnInTransit).toHaveBeenCalledTimes(2);
         expect(mockOrderClient.markReturnReceived).toHaveBeenCalledTimes(1);
+    });
+
+    // Callback nhảy thẳng tới RETURNED vẫn phải chốt phí trước khi Order Service ghi nhận đã nhận kiện.
+    it('should finalize the return fee before receiving a directly returned shipment', async () => {
+        // Arrange
+        const reverseShipment = {
+            ...shipment,
+            shipmentKind: 'RETURN' as const,
+            returnRequestId: 'return-1',
+            status: ShipmentStatus.READY_TO_SHIP,
+            shippingFee: '120000.00',
+            events: [],
+        } as Shipment;
+        const shipmentRepository = {
+            createQueryBuilder: jest.fn().mockReturnValue({
+                where: jest.fn().mockReturnThis(),
+                setLock: jest.fn().mockReturnThis(),
+                getOne: jest.fn().mockResolvedValue(reverseShipment),
+            }),
+            save: jest.fn(async (entity: Shipment) => entity),
+        };
+        const eventRepository = {
+            find: jest.fn().mockResolvedValue([]),
+            findOne: jest.fn().mockResolvedValue(null),
+            create: jest.fn((event: Partial<ShipmentEvent>) => ({
+                id: `event-${event.toStatus}`,
+                ...event,
+            })),
+            save: jest.fn(async (event: ShipmentEvent) => event),
+        };
+        const manager = {
+            getRepository: jest.fn(
+                (entity: typeof Shipment | typeof ShipmentEvent) =>
+                    entity === Shipment ? shipmentRepository : eventRepository,
+            ),
+        };
+        mockDataSource.transaction.mockImplementation(async (callback) =>
+            (callback as unknown as (value: unknown) => Promise<unknown>)(
+                manager,
+            ),
+        );
+        mockShipmentEntityRepository.findOne.mockResolvedValue(reverseShipment);
+        mockProvider.getShipment.mockResolvedValue({
+            trackingId: 'return-tracking-1',
+            providerOrderReference: 'return-order-1',
+            providerStatusCode: 46,
+            providerStatusText: 'returned',
+            status: ShipmentStatus.RETURNED,
+            currentLocation: null,
+            estimatedDeliveryAt: null,
+            occurredAt: new Date('2026-09-03T10:02:00.000Z'),
+            reason: 'Đã hoàn về shop',
+            shippingFee: '125000.00',
+        });
+
+        // Act
+        const returned = await target.syncInternal('shipment-1');
+
+        // Assert
+        expect(returned.status).toBe(ShipmentStatus.RETURNED);
+        expect(mockOrderClient.updateReturnShippingCost).toHaveBeenCalledWith(
+            'return-1',
+            '125000.00',
+        );
+        const updateCall =
+            mockOrderClient.updateReturnShippingCost.mock.invocationCallOrder[0];
+        const receivedCall =
+            mockOrderClient.markReturnReceived.mock.invocationCallOrder[0];
+        expect(updateCall).toBeDefined();
+        expect(receivedCall).toBeDefined();
+        expect(updateCall!).toBeLessThan(receivedCall!);
+        expect(mockOrderClient.markReturnInTransit).toHaveBeenCalledWith(
+            'return-1',
+        );
+        expect(mockOrderClient.markReturnReceived).toHaveBeenCalledWith(
+            'return-1',
+        );
     });
 });

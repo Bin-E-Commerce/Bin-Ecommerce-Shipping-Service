@@ -107,6 +107,19 @@ export class OrderClient {
         );
     }
 
+    // Ghi nhận yêu cầu bị từ chối sau khi Shipping đã hủy nhãn có phí vượt giá trị hàng hoàn.
+    async rejectReturnForShippingCostLimit(
+        returnId: string,
+        amount: string,
+    ): Promise<void> {
+        await this.request<{ id: string }>(
+            `/api/v1/internal/orders/returns/${returnId}/reject-shipping-limit`,
+            {},
+            'POST',
+            { amount },
+        );
+    }
+
     // Chuẩn hóa lỗi HTTP nội bộ để không làm lộ response hoặc hostname của downstream service.
     private async request<T>(
         path: string,
