@@ -318,15 +318,7 @@ export class ShippingService {
         const existing =
             await this.repository.findByReturnRequest(returnRequestId);
         if (existing) {
-            if (
-                ![
-                    ShipmentStatus.RETURNED,
-                    ShipmentStatus.CANCELLED,
-                    ShipmentStatus.FAILED,
-                ].includes(existing.status)
-            ) {
-                await this.orderClient.markReturnInTransit(returnRequestId);
-            }
+            await this.syncAcceptedReturnShipment(existing);
             return this.toResponse(existing);
         }
         const context =
@@ -357,12 +349,14 @@ export class ShippingService {
             shipmentKind: 'RETURN',
         });
         const isLocalDemoReturn = this.isLocalDemoMode();
-        // Không cho phép phí thực tế rỗng ghi đè phí quote đã chốt; GHN phải trả total_fee cho vận đơn hoàn.
-        // Nếu provider thiếu phí, hủy vận đơn vừa tạo để seller có thể thử lại mà không sinh dữ liệu lệch.
+        const carrierFee = Number(
+            providerShipment.shippingFee ??
+                (isLocalDemoReturn ? context.returnShippingEstimatedCost : 0),
+        );
+        // Quote của Order là fallback duy nhất cho shipment demo nội bộ; carrier thật phải trả phí hợp lệ khi tạo nhãn.
         if (
             !isLocalDemoReturn &&
-            (!providerShipment.shippingFee ||
-                Number(providerShipment.shippingFee) <= 0)
+            (!Number.isFinite(carrierFee) || carrierFee <= 0)
         ) {
             await this.compensateProviderShipment(
                 providerShipment.trackingId,
@@ -372,20 +366,23 @@ export class ShippingService {
                 'GHN không trả về chi phí vận chuyển hoàn hàng.',
             );
         }
-        // GHN trả total_fee theo đúng tuyến customer -> shop; demo giữ nguyên phí quote đã chốt trong Order.
-        if (!isLocalDemoReturn) {
-            try {
-                await this.orderClient.updateReturnShippingCost(
-                    returnRequestId,
-                    providerShipment.shippingFee ?? '0.00',
-                );
-            } catch (error) {
-                await this.compensateProviderShipment(
-                    providerShipment.trackingId,
-                    'Order Service không ghi nhận được phí vận chuyển hoàn hàng.',
-                );
-                throw error;
-            }
+        const returnedItemValue = context.items.reduce(
+            (sum, item) => sum + Number(item.lineTotal),
+            0,
+        );
+        if (
+            context.returnShippingPayer === 'CUSTOMER' &&
+            carrierFee > returnedItemValue
+        ) {
+            // Provider có thể trả phí cao hơn quote ban đầu sau khi đã cấp nhãn; phải hủy nhãn trước rồi mới từ chối request.
+            await this.cancelOverLimitReturnShipment(
+                providerShipment.trackingId,
+                returnRequestId,
+                String(carrierFee),
+            );
+            throw new ConflictException(
+                'Phí hoàn GHN cao hơn giá trị sản phẩm; vận đơn đã được hủy và yêu cầu hoàn đã bị từ chối.',
+            );
         }
         let transition: { shipment: Shipment; event: ShipmentEvent };
         try {
@@ -420,6 +417,8 @@ export class ShippingService {
                         providerShipment.currentLocation.label,
                     routePoints: providerShipment.routePoints,
                     estimatedDeliveryAt: providerShipment.estimatedDeliveryAt,
+                    // Giá GHN được lưu như snapshot vận đơn, nhưng Order chỉ hạch toán khi status xác nhận đã nhận kiện.
+                    shippingFee: String(carrierFee),
                 });
                 const saved = await shipmentRepository.save(shipment);
                 const event = eventRepository.create({
@@ -449,8 +448,32 @@ export class ShippingService {
             throw error;
         }
         await this.events.publish(transition.shipment, transition.event);
-        await this.orderClient.markReturnInTransit(returnRequestId);
+        await this.syncAcceptedReturnShipment(transition.shipment);
         return this.toResponse(transition.shipment);
+    }
+
+    // Chỉ khi GHN đã nhận hoặc đã hoàn kiện mới chốt phí thực tế; RETURNED vẫn phải đi qua bước này trước khi ghi nhận đã nhận hàng.
+    private async syncAcceptedReturnShipment(
+        shipment: Shipment,
+    ): Promise<void> {
+        if (
+            shipment.shipmentKind !== 'RETURN' ||
+            !shipment.returnRequestId ||
+            ![
+                ShipmentStatus.PICKED_UP,
+                ShipmentStatus.IN_TRANSIT,
+                ShipmentStatus.RETURNING,
+                ShipmentStatus.RETURNED,
+            ].includes(shipment.status)
+        )
+            return;
+        if (shipment.shippingFee && Number(shipment.shippingFee) > 0) {
+            await this.orderClient.updateReturnShippingCost(
+                shipment.returnRequestId,
+                shipment.shippingFee,
+            );
+        }
+        await this.orderClient.markReturnInTransit(shipment.returnRequestId);
     }
 
     // Seller chỉ đọc shipment thuộc shop được resolve từ context hiện tại.
@@ -788,6 +811,41 @@ export class ShippingService {
         }
     }
 
+    // Chỉ chuyển request sang REJECTED sau khi carrier xác nhận hủy nhãn, tránh báo khách hết phí nhưng kiện vẫn được vận chuyển.
+    // Nếu GHN hoặc Order Service lỗi, giữ lỗi để seller retry thay vì tạo trạng thái local không thể đối soát.
+    private async cancelOverLimitReturnShipment(
+        trackingId: string,
+        returnRequestId: string,
+        carrierFee: string,
+    ): Promise<void> {
+        try {
+            await this.provider.cancelShipment(trackingId);
+        } catch (error) {
+            this.logger.error(
+                'Không thể hủy nhãn GHN có phí vượt giá trị hàng hoàn.',
+                error instanceof Error ? error.stack : String(error),
+            );
+            throw new BadGatewayException(
+                'GHN chưa xác nhận hủy vận đơn; yêu cầu hoàn chưa bị từ chối, vui lòng thử lại sau.',
+            );
+        }
+
+        try {
+            await this.orderClient.rejectReturnForShippingCostLimit(
+                returnRequestId,
+                carrierFee,
+            );
+        } catch (error) {
+            this.logger.error(
+                'Đã hủy nhãn GHN nhưng chưa cập nhật được trạng thái yêu cầu hoàn.',
+                error instanceof Error ? error.stack : String(error),
+            );
+            throw new BadGatewayException(
+                'Vận đơn đã hủy nhưng chưa cập nhật được yêu cầu hoàn; vui lòng thử lại để đồng bộ trạng thái.',
+            );
+        }
+    }
+
     // Compensation cho provider khi transaction local rollback sau lúc GHN đã tạo vận đơn.
     // Không nuốt lỗi hủy provider trong log để đội vận hành có thể truy vết và retry khi GHN tạm thời lỗi.
     private async compensateProviderShipment(
@@ -923,6 +981,9 @@ export class ShippingService {
             shipment.providerStatusText = update.providerStatusText;
             shipment.lastProviderSyncedAt = new Date();
             shipment.status = nextStatus;
+            // GHN có thể điều chỉnh phí sau khi tạo nhãn; chỉ thay snapshot khi tracking trả về phí dương để không ghi đè bằng dữ liệu thiếu.
+            if (update.shippingFee && Number(update.shippingFee) > 0)
+                shipment.shippingFee = update.shippingFee;
             if (update.currentLocation) {
                 shipment.currentLatitude = String(
                     update.currentLocation.latitude,
@@ -984,11 +1045,7 @@ export class ShippingService {
         ) {
             // Đồng bộ từng mốc reverse shipment để Order Service không bị kẹt ở
             // AWAITING_SHIPMENT khi callback sau lúc tạo vận đơn bị gián đoạn.
-            if (result.shipment.status === ShipmentStatus.RETURNING) {
-                await this.orderClient.markReturnInTransit(
-                    result.shipment.returnRequestId,
-                );
-            }
+            await this.syncAcceptedReturnShipment(result.shipment);
             if (result.shipment.status === ShipmentStatus.RETURNED) {
                 await this.orderClient.markReturnReceived(
                     result.shipment.returnRequestId,

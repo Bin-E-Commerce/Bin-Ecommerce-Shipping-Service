@@ -74,6 +74,10 @@ export interface ReturnShippingOrderContext {
     orderNumber: string;
     ownerId: string;
     shopId: string;
+    reason: string;
+    returnShippingPayer: 'CUSTOMER' | 'SELLER' | null;
+    returnShippingEstimatedCost: string;
+    refundItemAmount: string;
     shippingAddress: ShippingAddress;
     items: ShippingOrderContext['items'];
 }
@@ -156,6 +160,7 @@ export interface ProviderShipmentStatus {
     estimatedDeliveryAt: Date | null;
     occurredAt: Date;
     reason: string | null;
+    shippingFee?: string | null;
 }
 
 export interface PrintedShippingLabel {

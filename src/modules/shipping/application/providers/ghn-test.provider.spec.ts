@@ -222,6 +222,7 @@ describe('GhnTestProvider', () => {
                             client_order_code: 'BIN-1001-shop-1',
                             status: 'delivering',
                             updated_date: '2026-09-01T10:00:00Z',
+                            total_fee: 125000,
                         },
                     });
                 if (url.endsWith('/switch-status/cancel'))
@@ -252,6 +253,7 @@ describe('GhnTestProvider', () => {
 
         // Assert
         expect(tracking.status).toBe(ShipmentStatus.IN_TRANSIT);
+        expect(tracking.shippingFee).toBe('125000.00');
         expect(
             fetchMock.mock.calls.some(([url]) =>
                 String(url).endsWith('/switch-status/cancel'),

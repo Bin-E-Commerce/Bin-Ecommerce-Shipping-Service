@@ -132,6 +132,15 @@ export class Shipment {
     })
     estimatedDeliveryAt!: Date | null;
 
+    @Column({
+        name: 'shipping_fee',
+        type: 'numeric',
+        precision: 14,
+        scale: 2,
+        nullable: true,
+    })
+    shippingFee!: string | null;
+
     @VersionColumn({ name: 'version' })
     version!: number;
 
