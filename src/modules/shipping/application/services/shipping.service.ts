@@ -714,6 +714,15 @@ export class ShippingService {
         return this.toResponse(shipment);
     }
 
+    // Order Service chỉ cần biết vận đơn return đã tạo và đang ở mốc nào để khóa review legacy đúng lúc.
+    async getInternalReturn(
+        returnRequestId: string,
+    ): Promise<{ id: string; status: ShipmentStatus } | null> {
+        const shipment =
+            await this.repository.findByReturnRequest(returnRequestId);
+        return shipment ? { id: shipment.id, status: shipment.status } : null;
+    }
+
     // Internal worker sync dùng chung applyProviderUpdate với webhook.
     async syncInternal(shipmentId: string): Promise<ShipmentResponse> {
         return this.toResponse(await this.syncShipment(shipmentId, 'POLL'));
@@ -958,45 +967,53 @@ export class ShippingService {
         source: EventSource,
         eventKey: string,
     ): Promise<Shipment> {
+        // RETURNED là mốc cuối để tính refund; nếu webhook thiếu fee thì hỏi lại detail GHN,
+        // không được âm thầm dùng snapshot lúc tạo nhãn như phí thực tế cuối cùng.
+        const resolvedUpdate = await this.resolveReturnFinalFee(update);
         const result = await this.dataSource.transaction(async (manager) => {
             const shipment = await this.lockShipment(manager, shipmentId);
             const eventRepository = manager.getRepository(ShipmentEvent);
             const previousStatus = shipment.status;
             const nextStatus =
-                update.status &&
+                resolvedUpdate.status &&
                 this.canTransition(
                     previousStatus,
-                    update.status,
+                    resolvedUpdate.status,
                     shipment.shipmentKind,
                 )
-                    ? update.status
+                    ? resolvedUpdate.status
                     : previousStatus;
             shipment.providerTrackingId =
-                update.trackingId || shipment.providerTrackingId;
+                resolvedUpdate.trackingId || shipment.providerTrackingId;
             shipment.trackingCode = shipment.providerTrackingId;
             shipment.providerOrderReference =
-                update.providerOrderReference ??
+                resolvedUpdate.providerOrderReference ??
                 shipment.providerOrderReference;
-            shipment.providerStatusCode = update.providerStatusCode;
-            shipment.providerStatusText = update.providerStatusText;
+            shipment.providerStatusCode = resolvedUpdate.providerStatusCode;
+            shipment.providerStatusText = resolvedUpdate.providerStatusText;
             shipment.lastProviderSyncedAt = new Date();
             shipment.status = nextStatus;
             // GHN có thể điều chỉnh phí sau khi tạo nhãn; chỉ thay snapshot khi tracking trả về phí dương để không ghi đè bằng dữ liệu thiếu.
-            if (update.shippingFee && Number(update.shippingFee) > 0)
-                shipment.shippingFee = update.shippingFee;
-            if (update.currentLocation) {
+            if (
+                resolvedUpdate.shippingFee &&
+                Number(resolvedUpdate.shippingFee) > 0
+            )
+                shipment.shippingFee = resolvedUpdate.shippingFee;
+            if (resolvedUpdate.currentLocation) {
                 shipment.currentLatitude = String(
-                    update.currentLocation.latitude,
+                    resolvedUpdate.currentLocation.latitude,
                 );
                 shipment.currentLongitude = String(
-                    update.currentLocation.longitude,
+                    resolvedUpdate.currentLocation.longitude,
                 );
-                shipment.currentLocationLabel = update.currentLocation.label;
+                shipment.currentLocationLabel =
+                    resolvedUpdate.currentLocation.label;
             }
-            if (update.routePoints?.length)
-                shipment.routePoints = update.routePoints;
-            if (update.estimatedDeliveryAt)
-                shipment.estimatedDeliveryAt = update.estimatedDeliveryAt;
+            if (resolvedUpdate.routePoints?.length)
+                shipment.routePoints = resolvedUpdate.routePoints;
+            if (resolvedUpdate.estimatedDeliveryAt)
+                shipment.estimatedDeliveryAt =
+                    resolvedUpdate.estimatedDeliveryAt;
             const saved = await manager.getRepository(Shipment).save(shipment);
             const duplicate = await eventRepository.findOne({
                 where: { providerEventKey: eventKey },
@@ -1009,13 +1026,14 @@ export class ShippingService {
                 fromStatus:
                     previousStatus === nextStatus ? null : previousStatus,
                 toStatus: nextStatus,
-                reason: update.reason ?? update.providerStatusText,
+                reason:
+                    resolvedUpdate.reason ?? resolvedUpdate.providerStatusText,
                 latitude: saved.currentLatitude,
                 longitude: saved.currentLongitude,
                 locationLabel: saved.currentLocationLabel,
-                providerStatusCode: update.providerStatusCode,
+                providerStatusCode: resolvedUpdate.providerStatusCode,
                 eventSource: source,
-                occurredAt: update.occurredAt,
+                occurredAt: resolvedUpdate.occurredAt,
             });
             try {
                 await eventRepository.save(event);
@@ -1053,6 +1071,20 @@ export class ShippingService {
             }
         }
         return result.shipment;
+    }
+
+    // Detail GHN phải trả phí dương tại RETURNED; thiếu phí thì dừng state transition để chờ provider retry.
+    private async resolveReturnFinalFee(
+        update: ProviderShipmentStatus,
+    ): Promise<ProviderShipmentStatus> {
+        if (update.status !== ShipmentStatus.RETURNED) return update;
+        if (update.shippingFee && Number(update.shippingFee) > 0) return update;
+        const detail = await this.provider.getShipment(update.trackingId);
+        if (!detail.shippingFee || Number(detail.shippingFee) <= 0)
+            throw new BadGatewayException(
+                'GHN chưa trả phí cuối cùng cho vận đơn hoàn; chưa thể chốt refund.',
+            );
+        return { ...update, shippingFee: detail.shippingFee };
     }
 
     // State machine giữ nguyên tính đơn điệu cho từng chiều vận chuyển; reverse

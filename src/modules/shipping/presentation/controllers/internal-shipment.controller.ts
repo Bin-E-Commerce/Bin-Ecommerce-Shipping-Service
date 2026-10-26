@@ -21,6 +21,16 @@ export class InternalShipmentController {
         private readonly config: ConfigService,
     ) {}
 
+    // Order Service dùng route này để kiểm tra return legacy trước khi cho seller phân loại payer.
+    @Get('returns/:returnRequestId')
+    getReturn(
+        @Param('returnRequestId', new ParseUUIDPipe()) returnRequestId: string,
+        @Headers('x-internal-service-token') token: string,
+    ) {
+        this.assertToken(token);
+        return this.shippingService.getInternalReturn(returnRequestId);
+    }
+
     // Lấy shipment nội bộ sau khi xác thực shared token.
     @Get(':shipmentId')
     get(
