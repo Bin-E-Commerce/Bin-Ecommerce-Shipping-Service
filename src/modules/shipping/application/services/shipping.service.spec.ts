@@ -551,6 +551,7 @@ describe('ShippingService consistency', () => {
                 estimatedDeliveryAt: null,
                 occurredAt: new Date('2026-09-03T10:02:00.000Z'),
                 reason: 'Đã hoàn về shop',
+                shippingFee: '125000.00',
             });
 
         // Act
@@ -633,7 +634,8 @@ describe('ShippingService consistency', () => {
             '125000.00',
         );
         const updateCall =
-            mockOrderClient.updateReturnShippingCost.mock.invocationCallOrder[0];
+            mockOrderClient.updateReturnShippingCost.mock
+                .invocationCallOrder[0];
         const receivedCall =
             mockOrderClient.markReturnReceived.mock.invocationCallOrder[0];
         expect(updateCall).toBeDefined();
