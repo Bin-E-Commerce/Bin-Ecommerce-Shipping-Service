@@ -94,6 +94,28 @@ export class OrderClient {
         );
     }
 
+    // Đồng bộ lỗi carrier để return state bật hành động retry cho Seller.
+    async markReturnShipmentFailed(
+        returnId: string,
+        note: string,
+    ): Promise<void> {
+        await this.request<{ id: string }>(
+            `/api/v1/internal/orders/returns/${returnId}/shipment-failed`,
+            {},
+            'POST',
+            { note },
+        );
+    }
+
+    // Chuyển return request khỏi trạng thái thất bại khi vận đơn retry đã commit ở local DB.
+    async markReturnShipmentRetryStarted(returnId: string): Promise<void> {
+        await this.request<{ id: string }>(
+            `/api/v1/internal/orders/returns/${returnId}/shipment-retry-started`,
+            {},
+            'POST',
+        );
+    }
+
     // Đồng bộ chi phí GHN chiều ngược về Order Service để tính đúng số tiền khách được hoàn.
     async updateReturnShippingCost(
         returnId: string,
