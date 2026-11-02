@@ -308,7 +308,7 @@ export class ShippingService {
         return this.toResponse(transition.shipment);
     }
 
-    // Tạo reverse shipment từ customer về đúng shop; idempotency dựa trên returnRequestId.
+    // Tạo reverse shipment theo return id; shipment đang chạy trả nguyên bản, còn FAILED/CANCELLED được rebook trên cùng record.
     async createReturnForSeller(
         returnRequestId: string,
         currentUser: CurrentSellerContext,
@@ -317,10 +317,22 @@ export class ShippingService {
         const shopId = await this.sellerShopClient.getOwnedShopId(currentUser);
         const existing =
             await this.repository.findByReturnRequest(returnRequestId);
-        if (existing) {
+        const retryingFailedShipment = Boolean(
+            existing &&
+            [ShipmentStatus.FAILED, ShipmentStatus.CANCELLED].includes(
+                existing.status,
+            ),
+        );
+        if (existing && !retryingFailedShipment) {
             await this.syncAcceptedReturnShipment(existing);
             return this.toResponse(existing);
         }
+        if (existing)
+            await this.orderClient.markReturnShipmentFailed(
+                returnRequestId,
+                existing.providerStatusText ||
+                    'Vận đơn hoàn trước đó đã thất bại; cần tạo lại.',
+            );
         const context =
             await this.orderClient.getReturnShippingContext(returnRequestId);
         if (context.shopId !== shopId)
@@ -389,7 +401,7 @@ export class ShippingService {
             transition = await this.dataSource.transaction(async (manager) => {
                 const shipmentRepository = manager.getRepository(Shipment);
                 const eventRepository = manager.getRepository(ShipmentEvent);
-                const shipment = shipmentRepository.create({
+                const shipmentData: Partial<Shipment> = {
                     orderId: context.orderId,
                     orderNumber: context.orderNumber,
                     shopId,
@@ -419,25 +431,51 @@ export class ShippingService {
                     estimatedDeliveryAt: providerShipment.estimatedDeliveryAt,
                     // Giá GHN được lưu như snapshot vận đơn, nhưng Order chỉ hạch toán khi status xác nhận đã nhận kiện.
                     shippingFee: String(carrierFee),
-                });
-                const saved = await shipmentRepository.save(shipment);
+                };
+                let shipment: Shipment;
+                if (retryingFailedShipment && existing) {
+                    const locked = await shipmentRepository.findOne({
+                        where: { id: existing.id },
+                        lock: { mode: 'pessimistic_write' },
+                    });
+                    if (
+                        !locked ||
+                        ![
+                            ShipmentStatus.FAILED,
+                            ShipmentStatus.CANCELLED,
+                        ].includes(locked.status)
+                    )
+                        throw new ConflictException(
+                            'Vận đơn đã được retry bởi một thao tác khác.',
+                        );
+                    Object.assign(locked, shipmentData);
+                    shipment = await shipmentRepository.save(locked);
+                } else {
+                    shipment = await shipmentRepository.save(
+                        shipmentRepository.create(shipmentData),
+                    );
+                }
                 const event = eventRepository.create({
-                    shipmentId: saved.id,
-                    providerEventKey: `create:return:${returnRequestId}`,
+                    shipmentId: shipment.id,
+                    providerEventKey: retryingFailedShipment
+                        ? `retry:return:${returnRequestId}:${providerShipment.trackingId}`
+                        : `create:return:${returnRequestId}`,
                     fromStatus: null,
-                    toStatus: saved.status,
-                    reason: 'Tạo vận đơn hoàn GHN Test thành công.',
-                    latitude: saved.currentLatitude,
-                    longitude: saved.currentLongitude,
-                    locationLabel: saved.currentLocationLabel,
-                    providerStatusCode: saved.providerStatusCode,
+                    toStatus: shipment.status,
+                    reason: retryingFailedShipment
+                        ? 'Seller tạo lại vận đơn hoàn sau lần giao thất bại.'
+                        : 'Tạo vận đơn hoàn GHN thành công.',
+                    latitude: shipment.currentLatitude,
+                    longitude: shipment.currentLongitude,
+                    locationLabel: shipment.currentLocationLabel,
+                    providerStatusCode: shipment.providerStatusCode,
                     eventSource: 'SYSTEM',
                     occurredAt: new Date(),
                 });
                 await eventRepository.save(event);
-                saved.events = [event];
-                await this.events.enqueue(saved, event, manager);
-                return { shipment: saved, event };
+                shipment.events = [...(shipment.events ?? []), event];
+                await this.events.enqueue(shipment, event, manager);
+                return { shipment, event };
             });
         } catch (error) {
             // Transaction rollback làm mất shipment local, nên phải hủy GHN ngay để không để lại vận đơn mồ côi.
@@ -448,8 +486,30 @@ export class ShippingService {
             throw error;
         }
         await this.events.publish(transition.shipment, transition.event);
-        await this.syncAcceptedReturnShipment(transition.shipment);
+        if (retryingFailedShipment)
+            await this.orderClient.markReturnShipmentRetryStarted(
+                returnRequestId,
+            );
+        await this.syncReturnShipmentState(transition.shipment);
         return this.toResponse(transition.shipment);
+    }
+
+    // Kết nối trạng thái cuối của carrier về Order Service; FAILED/CANCELLED tạo lỗi retry thay vì bị kẹt IN_TRANSIT.
+    private async syncReturnShipmentState(shipment: Shipment): Promise<void> {
+        if (shipment.shipmentKind !== 'RETURN' || !shipment.returnRequestId)
+            return;
+        if (
+            shipment.status === ShipmentStatus.FAILED ||
+            shipment.status === ShipmentStatus.CANCELLED
+        ) {
+            await this.orderClient.markReturnShipmentFailed(
+                shipment.returnRequestId,
+                shipment.providerStatusText ||
+                    'Carrier không thể tiếp tục vận chuyển hàng hoàn.',
+            );
+            return;
+        }
+        await this.syncAcceptedReturnShipment(shipment);
     }
 
     // Chỉ khi GHN đã nhận hoặc đã hoàn kiện mới chốt phí thực tế; RETURNED vẫn phải đi qua bước này trước khi ghi nhận đã nhận hàng.
@@ -1063,7 +1123,7 @@ export class ShippingService {
         ) {
             // Đồng bộ từng mốc reverse shipment để Order Service không bị kẹt ở
             // AWAITING_SHIPMENT khi callback sau lúc tạo vận đơn bị gián đoạn.
-            await this.syncAcceptedReturnShipment(result.shipment);
+            await this.syncReturnShipmentState(result.shipment);
             if (result.shipment.status === ShipmentStatus.RETURNED) {
                 await this.orderClient.markReturnReceived(
                     result.shipment.returnRequestId,
