@@ -554,6 +554,27 @@ export class ShippingService {
         return this.toResponse(shipment);
     }
 
+    // Đọc vận đơn hoàn theo return request và shop resolve từ session Seller.
+    // Trả 404 nếu chưa có shipment hoặc ID không thuộc shop để giữ ranh giới tenant.
+    // GET không gọi carrier hay đổi trạng thái; response chỉ phản ánh bản ghi đã lưu.
+    async getReturnShipmentForSeller(
+        returnRequestId: string,
+        currentUser: CurrentSellerContext,
+    ): Promise<ShipmentResponse> {
+        this.ensureSellerContext(currentUser);
+        const shopId = await this.sellerShopClient.getOwnedShopId(currentUser);
+        const shipment =
+            await this.repository.findReturnShipmentByRequestAndShop(
+                returnRequestId,
+                shopId,
+            );
+        if (!shipment)
+            throw new NotFoundException(
+                'Chưa có vận đơn hoàn cho yêu cầu này.',
+            );
+        return this.toResponse(shipment);
+    }
+
     // Làm mới trạng thái từ GHN theo đúng scope Seller.
     async refreshForSeller(
         orderId: string,

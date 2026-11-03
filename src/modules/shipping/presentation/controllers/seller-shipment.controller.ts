@@ -84,6 +84,18 @@ export class SellerShipmentController {
         );
     }
 
+    // Không nhận shop ID từ browser; service kiểm tra quyền theo Seller session.
+    @Get('returns/:returnId/shipment')
+    getReturn(
+        @Param('returnId', new ParseUUIDPipe()) returnId: string,
+        @Headers() headers: Record<string, unknown>,
+    ) {
+        return this.shippingService.getReturnShipmentForSeller(
+            returnId,
+            this.buildContext(headers),
+        );
+    }
+
     // Bỏ qua một chặng để trình diễn lộ trình trong môi trường GHN Test.
     @Post(':orderId/shipment/demo/advance')
     advanceDemo(
