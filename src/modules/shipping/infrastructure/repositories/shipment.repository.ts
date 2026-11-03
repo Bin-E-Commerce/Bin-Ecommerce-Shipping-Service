@@ -46,6 +46,19 @@ export class ShipmentRepository {
         });
     }
 
+    // Chỉ trả vận đơn có cả return ID và shop ID trùng dữ liệu đã xác thực.
+    // Điều này ngăn GET theo ID làm lộ shipment thuộc shop khác.
+    findReturnShipmentByRequestAndShop(
+        returnRequestId: string,
+        shopId: string,
+    ): Promise<Shipment | null> {
+        return this.shipmentRepository.findOne({
+            where: { returnRequestId, shopId, shipmentKind: 'RETURN' },
+            relations: { events: true },
+            order: { events: { occurredAt: 'ASC' } },
+        });
+    }
+
     // Polling chỉ lấy shipment active đã quá thời gian đồng bộ; trạng thái terminal không tạo request thừa.
     findSyncCandidates(now: Date, staleAfterMs: number): Promise<Shipment[]> {
         const staleAt = new Date(now.getTime() - staleAfterMs);
