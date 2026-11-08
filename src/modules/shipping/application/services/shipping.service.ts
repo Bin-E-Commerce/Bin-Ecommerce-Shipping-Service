@@ -658,23 +658,25 @@ export class ShippingService {
         return this.toResponse(result.shipment);
     }
 
-    // Kiểm tra đăng nhập, ownership của return và order trước khi cho phép mô phỏng trạng thái.
-    // Guard demo dùng chung cờ GHN Test với Seller nhưng không bật local-demo fee behavior trên production.
-    // Bước cuối vẫn đồng bộ trạng thái nhận hàng về Order Service như luồng hiện hữu.
+    // Kiểm tra quyền sở hữu trước khi mô phỏng; mỗi chặng phải đồng bộ phí và trạng thái qua cùng state machine với GHN.
+    // Chặng PICKED_UP trở đi mới chốt phí vận chuyển thực tế trước khi cập nhật vận đơn hoàn.
     async advanceDemoForCustomerReturn(
         returnRequestId: string,
         ownerId: string,
     ): Promise<ShipmentResponse> {
+        // Không cho phép mô phỏng khi request không mang identity đã được gateway xác thực.
         if (!ownerId)
             throw new UnauthorizedException(
                 'Bạn cần đăng nhập để mô phỏng hành trình hoàn hàng.',
             );
         const shipment =
             await this.repository.findByReturnRequest(returnRequestId);
+        // Request chưa có vận đơn thì không có state carrier nào an toàn để đẩy tiếp.
         if (!shipment)
             throw new NotFoundException(
                 'Chưa có vận đơn hoàn hàng để mô phỏng.',
             );
+        // Chỉ khách tạo vận đơn hoàn mới được tiến hành demo reverse shipment đó.
         if (
             shipment.shipmentKind !== 'RETURN' ||
             shipment.customerUserId !== ownerId
@@ -682,6 +684,7 @@ export class ShippingService {
             throw new ForbiddenException(
                 'Bạn không có quyền mô phỏng vận đơn hoàn hàng này.',
             );
+        // Kiểm tra ownership tại Order Service để đối chiếu lại quan hệ khách hàng và đơn gốc.
         await this.orderClient.assertCustomerOwnsOrder(
             shipment.orderId,
             ownerId,
@@ -690,16 +693,19 @@ export class ShippingService {
             shipment.status === ShipmentStatus.RETURNED &&
             shipment.returnRequestId
         ) {
-            await this.orderClient.markReturnReceived(shipment.returnRequestId);
+            // Bù phí cho vận đơn demo cũ đã RETURNED nhưng nhánh demo trước đây bỏ qua đồng bộ phí.
+            await this.reconcileCompletedDemoReturn(shipment);
             return this.toResponse(shipment);
         }
 
+        // Guard backend chặn tiến độ giả nếu provider/cấu hình không còn là GHN Test được bật demo.
         this.ensureDemoMode(shipment);
         const result = await this.advanceDemoShipment(
             shipment.id,
             DEMO_RETURN_STATUS_SEQUENCE,
         );
         await this.events.publish(result.shipment, result.event);
+        await this.syncReturnShipmentState(result.shipment);
         if (
             result.shipment.status === ShipmentStatus.RETURNED &&
             result.shipment.returnRequestId
@@ -773,16 +779,47 @@ export class ShippingService {
         orderId: string,
         ownerId: string,
     ): Promise<CustomerTrackingResponse> {
+        // Xác thực context trước khi dùng orderId để truy vấn shipment nhiều shop.
         if (!ownerId)
             throw new UnauthorizedException(
                 'Bạn cần đăng nhập để xem hành trình đơn hàng.',
             );
         await this.orderClient.assertCustomerOwnsOrder(orderId, ownerId);
         const shipments = await this.repository.findByOrder(orderId);
+        // Tự sửa dữ liệu demo cũ khi khách quay lại trang tracking sau khi đã nhận hàng hoàn.
+        await Promise.all(
+            shipments.map((shipment) =>
+                this.reconcileCompletedDemoReturn(shipment),
+            ),
+        );
         return {
             orderId,
             shipments: shipments.map((shipment) => this.toResponse(shipment)),
         };
+    }
+
+    // Bù phí GHN và mốc nhận kiện cho shipment demo terminal; helper idempotent nên an toàn khi tracking tải lại.
+    private async reconcileCompletedDemoReturn(
+        shipment: Shipment,
+    ): Promise<void> {
+        if (
+            shipment.shipmentKind !== 'RETURN' ||
+            shipment.status !== ShipmentStatus.RETURNED ||
+            !shipment.returnRequestId ||
+            !this.isDemoShipment(shipment) ||
+            !this.isDemoAdvancementEnabled()
+        )
+            return;
+        const returnShippingFee = shipment.shippingFee;
+        const actualFee = Number(returnShippingFee);
+        // Không dùng phí ước tính bằng 0 để khóa refund; chờ GHN/demo cung cấp phí dương rồi mới chốt.
+        if (!returnShippingFee || !Number.isFinite(actualFee) || actualFee <= 0)
+            return;
+        await this.orderClient.updateReturnShippingCost(
+            shipment.returnRequestId,
+            returnShippingFee,
+        );
+        await this.orderClient.markReturnReceived(shipment.returnRequestId);
     }
 
     // Internal orchestration chỉ dùng shipmentId sau khi controller đã xác thực shared token.
