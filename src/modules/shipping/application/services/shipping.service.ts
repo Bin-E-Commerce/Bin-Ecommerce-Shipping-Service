@@ -308,7 +308,9 @@ export class ShippingService {
         return this.toResponse(transition.shipment);
     }
 
-    // Tạo reverse shipment theo return id; shipment đang chạy trả nguyên bản, còn FAILED/CANCELLED được rebook trên cùng record.
+    // Tạo reverse shipment theo snapshot địa chỉ khách và kho shop, sau đó lưu shipment cùng event.
+    // Nếu GHN tạo mã nhưng thiếu phí, service hỏi fee endpoint đúng chiều khách → shop trước khi chấp nhận vận đơn.
+    // Khi không xác minh được phí hoặc transaction local lỗi, service yêu cầu GHN hủy nhãn để tránh lệch trạng thái.
     async createReturnForSeller(
         returnRequestId: string,
         currentUser: CurrentSellerContext,
@@ -361,11 +363,61 @@ export class ShippingService {
             shipmentKind: 'RETURN',
         });
         const isLocalDemoReturn = this.isLocalDemoMode();
-        const carrierFee = Number(
+        let carrierFee = Number(
             providerShipment.shippingFee ??
                 (isLocalDemoReturn ? context.returnShippingEstimatedCost : 0),
         );
-        // Quote của Order là fallback duy nhất cho shipment demo nội bộ; carrier thật phải trả phí hợp lệ khi tạo nhãn.
+        // GHN đôi lúc cấp mã vận đơn nhưng response create không có total_fee; tính lại cùng tuyến và kích thước kiện.
+        // Chỉ gọi fee endpoint khi phí create thiếu/sai để tránh request thừa trong trường hợp GHN đã trả phí hợp lệ.
+        if (
+            !isLocalDemoReturn &&
+            (!Number.isFinite(carrierFee) || carrierFee <= 0)
+        ) {
+            const packageDimensions = context.items.reduce(
+                (dimensions, item) => ({
+                    weightGrams:
+                        dimensions.weightGrams +
+                        item.packageWeightGrams * item.quantity,
+                    lengthCm: Math.max(
+                        dimensions.lengthCm,
+                        item.packageLengthCm,
+                    ),
+                    widthCm: Math.max(
+                        dimensions.widthCm,
+                        item.packageWidthCm,
+                    ),
+                    heightCm:
+                        dimensions.heightCm +
+                        item.packageHeightCm * item.quantity,
+                }),
+                { weightGrams: 0, lengthCm: 0, widthCm: 0, heightCm: 0 },
+            );
+            try {
+                const returnQuote = await this.provider.calculateFee({
+                    shopId,
+                    from: pickupAddress,
+                    to: shopAddress,
+                    ...packageDimensions,
+                    value,
+                    codAmount: 0,
+                });
+                carrierFee = Number(returnQuote.fee);
+            } catch (error) {
+                // Nhãn đã được tạo ở GHN, nên phải yêu cầu hủy trước khi báo lỗi tính phí cho caller.
+                await this.compensateProviderShipment(
+                    providerShipment.trackingId,
+                    'Không xác minh được phí vận chuyển hoàn hàng.',
+                );
+                this.logger.error(
+                    'Không thể xác minh phí hoàn sau khi GHN đã tạo vận đơn.',
+                    error instanceof Error ? error.stack : String(error),
+                );
+                throw new BadGatewayException(
+                    'GHN đã tạo vận đơn hoàn nhưng không xác minh được phí vận chuyển. Vui lòng thử lại.',
+                );
+            }
+        }
+        // Giá dự kiến từ Order chỉ dùng cho demo; carrier thật phải có phí dương từ create hoặc fee endpoint.
         if (
             !isLocalDemoReturn &&
             (!Number.isFinite(carrierFee) || carrierFee <= 0)
@@ -375,7 +427,7 @@ export class ShippingService {
                 'GHN không trả về chi phí vận chuyển hoàn hàng.',
             );
             throw new BadGatewayException(
-                'GHN không trả về chi phí vận chuyển hoàn hàng.',
+                'GHN không trả về hoặc không tính được chi phí vận chuyển hoàn hàng.',
             );
         }
         const returnedItemValue = context.items.reduce(
